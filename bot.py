@@ -23,6 +23,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 TRUSTED_IDS = [int(x) for x in os.getenv("TRUSTED_IDS", "").split(",") if x.strip()]
 
 STORE_TIMEZONE = ZoneInfo("Europe/Moscow")
+INIT_DATA_TTL = 60 * 60 * 24
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -57,7 +58,6 @@ def save_used_codes(data):
 def generate_code():
     used = load_used_codes()
     existing = {x["code"] for x in used if "code" in x}
-
     while True:
         code = "IG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
         if code not in existing:
@@ -100,33 +100,53 @@ def find_last_spin_by_user_id(user_id: int, used: list):
     return records[0]
 
 def validate_init_data(init_data: str, bot_token: str):
+    if not init_data or not bot_token:
+        return None
+
     try:
-        parsed = dict(parse_qsl(init_data, strict_parsing=True))
+        pairs = parse_qsl(init_data, keep_blank_values=True)
+    except Exception:
+        return None
+
+    data = dict(pairs)
+    received_hash = data.get("hash")
+    auth_date = data.get("auth_date")
+    user_raw = data.get("user")
+
+    if not received_hash or not auth_date or not user_raw:
+        return None
+
+    try:
+        auth_date_int = int(auth_date)
     except ValueError:
         return None
 
-    received_hash = parsed.pop("hash", None)
-    if not received_hash:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    if now_ts - auth_date_int > INIT_DATA_TTL:
         return None
 
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+    check_pairs = []
+    for key, value in pairs:
+        if key == "hash":
+            continue
+        check_pairs.append(f"{key}={value}")
+
+    check_pairs.sort()
+    data_check_string = "\n".join(check_pairs)
+
     secret_key = hmac.new(
-        b"WebAppData",
-        bot_token.encode(),
-        hashlib.sha256
+        key=b"WebAppData",
+        msg=bot_token.encode("utf-8"),
+        digestmod=hashlib.sha256
     ).digest()
 
     calculated_hash = hmac.new(
-        secret_key,
-        data_check_string.encode(),
-        hashlib.sha256
+        key=secret_key,
+        msg=data_check_string.encode("utf-8"),
+        digestmod=hashlib.sha256
     ).hexdigest()
 
     if not hmac.compare_digest(calculated_hash, received_hash):
-        return None
-
-    user_raw = parsed.get("user")
-    if not user_raw:
         return None
 
     try:
@@ -134,11 +154,12 @@ def validate_init_data(init_data: str, bot_token: str):
     except json.JSONDecodeError:
         return None
 
-    if "id" not in user:
+    user_id = user.get("id")
+    if user_id is None:
         return None
 
     return {
-        "user_id": int(user["id"]),
+        "user_id": int(user_id),
         "username": user.get("username", ""),
         "first_name": user.get("first_name", "")
     }
