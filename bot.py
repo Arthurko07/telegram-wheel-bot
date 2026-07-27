@@ -4,1315 +4,569 @@ import hmac
 import hashlib
 import random
 import string
-import asyncio
-from datetime import datetime, timezone, timedelta
-from urllib.parse import unquote
-from zoneinfo import ZoneInfo
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, WebAppInfo
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-TRUSTED_IDS = [int(x) for x in os.getenv("TRUSTED_IDS", "").split(",") if x.strip()]
-
-STORE_TIMEZONE = ZoneInfo("Europe/Moscow")
-INIT_DATA_TTL = 60 * 60 * 24
-
-DATA_DIR = "/app/data"
-PRIZES_FILE = os.path.join(DATA_DIR, "prizes.json")
-USED_CODES_FILE = os.path.join(DATA_DIR, "used_codes.json")
-
-DEFAULT_PRIZES = [
-    {
-        "id": 1,
-        "title": "Двойное начисление бонусов",
-        "short": "2x бонус",
-        "description": "Получите двойное начисление бонусов на покупку",
-        "weight": 20,
-        "active": True
-    },
-    {
-        "id": 2,
-        "title": "Скидка на зарядку 10%",
-        "short": "Зарядка -10%",
-        "description": "Скидка 10% на зарядные устройства",
-        "weight": 16,
-        "active": True
-    },
-    {
-        "id": 3,
-        "title": "Скидка на Power Bank 15%",
-        "short": "PB -15%",
-        "description": "Скидка 15% на Power Bank",
-        "weight": 14,
-        "active": True
-    },
-    {
-        "id": 4,
-        "title": "Скидка 500 ₽ на аксессуары",
-        "short": "500 ₽",
-        "description": "Скидка 500 рублей на аксессуары",
-        "weight": 12,
-        "active": True
-    },
-    {
-        "id": 5,
-        "title": "Подарок к покупке",
-        "short": "Подарок",
-        "description": "Подарок к покупке в магазине iGadget",
-        "weight": 10,
-        "active": True
-    },
-    {
-        "id": 6,
-        "title": "Бесплатная доставка",
-        "short": "Доставка",
-        "description": "Бесплатная доставка заказа",
-        "weight": 8,
-        "active": True
-    }
-]
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-app = FastAPI()
+app = FastAPI(title="Telegram Wheel Bot API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_IDS = {
+    int(x.strip())
+    for x in os.getenv("ADMIN_IDS", "").split(",")
+    if x.strip().isdigit()
+}
 
-class SpinRequest(BaseModel):
-    init_data: str = ""
-
-
-class AdminInitDataRequest(BaseModel):
-    init_data: str = ""
-
-
-class AdminPrizeCreateRequest(BaseModel):
-    init_data: str
-    title: str
-    short: str
-    description: str
-    weight: int
-    active: bool = True
+PRIZES_FILE = "prizes.json"
+USED_CODES_FILE = "used_codes.json"
+HISTORY_FILE = "history.json"
 
 
-class AdminPrizeUpdateWeightRequest(BaseModel):
-    init_data: str
-    prize_id: int
-    weight: int
+def read_json_file(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
-class AdminPrizeToggleRequest(BaseModel):
-    init_data: str
-    prize_id: int
+def write_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-class AdminPrizeDeleteRequest(BaseModel):
-    init_data: str
-    prize_id: int
-
-
-class AdminPrizeUpdateRequest(BaseModel):
-    init_data: str
-    prize_id: int
-    title: str
-    short: str
-    description: str
-    weight: int
-    active: bool
-
-
-class AdminCodeCheckRequest(BaseModel):
-    init_data: str
-    code: str
-
-
-class AdminCodeRedeemRequest(BaseModel):
-    init_data: str
-    code: str
-
-
-class AddPrizeStates(StatesGroup):
-    title = State()
-    short = State()
-    description = State()
-    weight = State()
-    active = State()
-
-
-class EditWeightStates(StatesGroup):
-    prize_id = State()
-    weight = State()
-
-
-class DeletePrizeStates(StatesGroup):
-    prize_id = State()
-
-
-class TogglePrizeStates(StatesGroup):
-    prize_id = State()
-
-
-def ensure_data_files():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
+def ensure_files():
     if not os.path.exists(PRIZES_FILE):
-        with open(PRIZES_FILE, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_PRIZES, f, ensure_ascii=False, indent=2)
+        write_json_file(PRIZES_FILE, [
+            {
+                "id": 1,
+                "title": "Скидка 5% на аксессуары",
+                "short": "-5%",
+                "description": "Скидка 5% на аксессуары.",
+                "weight": 35,
+                "active": True
+            },
+            {
+                "id": 2,
+                "title": "Скидка 10% на аксессуары",
+                "short": "-10%",
+                "description": "Скидка 10% на аксессуары.",
+                "weight": 22,
+                "active": True
+            },
+            {
+                "id": 3,
+                "title": "Скидка 15% на аксессуары",
+                "short": "-15%",
+                "description": "Скидка 15% на аксессуары.",
+                "weight": 12,
+                "active": True
+            },
+            {
+                "id": 4,
+                "title": "Бесплатная доставка",
+                "short": "Дост.",
+                "description": "Бесплатная доставка на заказ.",
+                "weight": 14,
+                "active": True
+            },
+            {
+                "id": 5,
+                "title": "Подарок к покупке",
+                "short": "Подарок",
+                "description": "Небольшой подарок при следующей покупке.",
+                "weight": 10,
+                "active": True
+            },
+            {
+                "id": 6,
+                "title": "Бонус 500",
+                "short": "500",
+                "description": "500 бонусов на следующий заказ.",
+                "weight": 7,
+                "active": True
+            }
+        ])
 
     if not os.path.exists(USED_CODES_FILE):
-        with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
+        write_json_file(USED_CODES_FILE, [])
+
+    if not os.path.exists(HISTORY_FILE):
+        write_json_file(HISTORY_FILE, [])
 
 
-def safe_file_info(path: str):
-    info = {
-        "path": path,
-        "exists": os.path.exists(path),
-        "is_file": os.path.isfile(path),
-        "size_bytes": None,
-        "preview": None
-    }
-
-    if os.path.isfile(path):
-        info["size_bytes"] = os.path.getsize(path)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                info["preview"] = f.read(1000)
-        except Exception as e:
-            info["preview"] = f"preview_error: {str(e)}"
-
-    return info
+ensure_files()
 
 
-def load_prizes():
-    ensure_data_files()
-    with open(PRIZES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def parse_init_data(init_data: str) -> dict:
+    parsed = urllib.parse.parse_qs(init_data, keep_blank_values=True)
+    return {k: v[0] for k, v in parsed.items()}
 
 
-def save_prizes(data):
-    ensure_data_files()
-    with open(PRIZES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_active_prizes():
-    return [x for x in load_prizes() if x.get("active")]
-
-
-def load_used_codes():
-    ensure_data_files()
-    with open(USED_CODES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_used_codes(data):
-    ensure_data_files()
-    with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def generate_code():
-    used = load_used_codes()
-    existing = {x["code"] for x in used if "code" in x}
-    while True:
-        code = "IG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-        if code not in existing:
-            return code
-
-
-def weighted_pick(prizes):
-    weights = [max(int(p.get("weight", 0)), 0) for p in prizes]
-    return random.choices(prizes, weights=weights, k=1)[0]
-
-
-def parse_dt(dt_str):
-    return datetime.fromisoformat(dt_str)
-
-
-def format_dt_msk(dt_obj):
-    return dt_obj.astimezone(STORE_TIMEZONE).strftime("%d.%m.%Y %H:%M:%S МСК")
-
-
-def format_next_spin_time_moscow():
-    now_msk = datetime.now(timezone.utc).astimezone(STORE_TIMEZONE)
-    tomorrow = now_msk.date().fromordinal(now_msk.date().toordinal() + 1)
-    next_spin = datetime(
-        tomorrow.year,
-        tomorrow.month,
-        tomorrow.day,
-        0, 0, 0,
-        tzinfo=STORE_TIMEZONE
-    )
-    return next_spin.strftime("%d.%m.%Y %H:%M МСК")
-
-
-def is_staff(user_id: int) -> bool:
-    return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
-def find_code_record(code: str, used: list):
-    code = code.strip().upper()
-    for item in used:
-        if item.get("code", "").upper() == code:
-            return item
-    return None
-
-
-def find_last_spin_by_user_id(user_id: int, used: list):
-    records = [x for x in used if x.get("user_id") == user_id and x.get("created_at")]
-    if not records:
+def validate_init_data(init_data: str):
+    if not init_data:
         return None
-    records.sort(key=lambda x: x["created_at"], reverse=True)
-    return records[0]
 
+    data = parse_init_data(init_data)
+    received_hash = data.pop("hash", None)
+    if not received_hash:
+        return None
 
-def is_code_expired(record: dict):
-    expires_at = record.get("expires_at")
-    if not expires_at:
-        return False
-    expires_dt = parse_dt(expires_at)
-    now_utc = datetime.now(timezone.utc)
-    return now_utc > expires_dt
+    if not BOT_TOKEN:
+        return None
 
+    data_check_arr = [f"{k}={v}" for k, v in sorted(data.items())]
+    data_check_string = "\n".join(data_check_arr)
 
-def validate_init_data(init_data: str, bot_token: str):
-    if not init_data or not bot_token:
+    secret_key = hmac.new(
+        b"WebAppData",
+        BOT_TOKEN.encode(),
+        hashlib.sha256
+    ).digest()
+
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        return None
+
+    user_raw = data.get("user")
+    if not user_raw:
         return None
 
     try:
-        decoded = unquote(init_data)
-
-        chunks = [
-            chunk.split("=", 1)
-            for chunk in decoded.split("&")
-            if not chunk.startswith("hash=")
-        ]
-        chunks.sort(key=lambda x: x[0])
-        data_check_string = "\n".join(f"{k}={v}" for k, v in chunks)
-
-        hash_value = None
-        for chunk in init_data.split("&"):
-            if chunk.startswith("hash="):
-                hash_value = chunk.split("=", 1)[1]
-                break
-
-        if not hash_value:
-            for chunk in decoded.split("&"):
-                if chunk.startswith("hash="):
-                    hash_value = chunk.split("=", 1)[1]
-                    break
-
-        if not hash_value:
-            return None
-
-        data_map = {}
-        for chunk in decoded.split("&"):
-            if "=" in chunk:
-                k, v = chunk.split("=", 1)
-                data_map[k] = v
-
-        auth_date = data_map.get("auth_date")
-        user_raw = data_map.get("user")
-
-        if not auth_date or not user_raw:
-            return None
-
-        auth_date_int = int(auth_date)
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        if now_ts - auth_date_int > INIT_DATA_TTL:
-            return None
-
-        secret_key = hmac.new(
-            b"WebAppData",
-            BOT_TOKEN.encode("utf-8"),
-            hashlib.sha256
-        ).digest()
-
-        calculated_hash = hmac.new(
-            secret_key,
-            data_check_string.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-
-        if not hmac.compare_digest(calculated_hash, hash_value):
-            return None
-
-        user = json.loads(user_raw)
-        if "id" not in user:
-            return None
-
-        return {
-            "user_id": int(user["id"]),
-            "username": user.get("username", ""),
-            "first_name": user.get("first_name", "")
-        }
-
+        return json.loads(user_raw)
     except Exception:
         return None
 
 
-def require_admin_from_init_data(init_data: str):
-    auth = validate_init_data(init_data, BOT_TOKEN)
-    if not auth:
-        return None, {"ok": False, "error": "Не удалось проверить Telegram-пользователя"}
-
-    if not is_admin(auth["user_id"]):
-        return None, {"ok": False, "error": "Нет доступа"}
-
-    return auth, None
+def get_user_from_init_data(init_data: str):
+    return validate_init_data(init_data)
 
 
-def admin_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Список призов", callback_data="admin:list")
-    builder.button(text="Добавить приз", callback_data="admin:add")
-    builder.button(text="Изменить вес", callback_data="admin:edit_weight")
-    builder.button(text="Вкл/выкл приз", callback_data="admin:toggle")
-    builder.button(text="Удалить приз", callback_data="admin:delete")
-    builder.adjust(1)
-    return builder.as_markup()
+def load_prizes():
+    return read_json_file(PRIZES_FILE, [])
 
 
-def wheel_keyboard():
-    builder = InlineKeyboardBuilder()
-    if WEB_APP_URL:
-        builder.button(
-            text="🎡 Открыть колесо",
-            web_app=WebAppInfo(url=WEB_APP_URL)
-        )
-    return builder.as_markup()
+def save_prizes(items):
+    write_json_file(PRIZES_FILE, items)
 
 
-def format_prizes_text():
-    prizes = load_prizes()
-    if not prizes:
-        return "Список призов пуст."
-
-    lines = ["Список призов:\n"]
-    total_weight = sum(p.get("weight", 0) for p in prizes if p.get("active"))
-    for p in prizes:
-        active_text = "включен" if p.get("active") else "выключен"
-        percent_text = ""
-        if p.get("active") and total_weight > 0:
-            chance = round((p.get("weight", 0) / total_weight) * 100, 2)
-            percent_text = f" (~{chance}%)"
-        lines.append(
-            f"ID: {p.get('id')}\n"
-            f"Название: {p.get('title')}\n"
-            f"Коротко: {p.get('short', '—')}\n"
-            f"Описание: {p.get('description')}\n"
-            f"Вес: {p.get('weight')}{percent_text}\n"
-            f"Статус: {active_text}\n"
-        )
-    return "\n".join(lines)
+def load_used_codes():
+    return read_json_file(USED_CODES_FILE, [])
 
 
-def get_next_prize_id(prizes):
-    if not prizes:
-        return 1
-    return max(p.get("id", 0) for p in prizes) + 1
+def save_used_codes(items):
+    write_json_file(USED_CODES_FILE, items)
 
 
-def find_prize_by_id(prize_id: int):
-    prizes = load_prizes()
-    for prize in prizes:
-        if prize.get("id") == prize_id:
-            return prize
+def load_history():
+    return read_json_file(HISTORY_FILE, [])
+
+
+def save_history(items):
+    write_json_file(HISTORY_FILE, items)
+
+
+def load_user_history(user_id):
+    items = load_history()
+    user_items = [x for x in items if str(x.get("user_id")) == str(user_id)]
+    user_items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return user_items
+
+
+def generate_code(length=6):
+    chars = string.ascii_uppercase + string.digits
+    return "IG-" + "".join(random.choice(chars) for _ in range(length))
+
+
+def generate_unique_code():
+    used_codes = load_used_codes()
+    used_set = {str(x) for x in used_codes}
+
+    for _ in range(50):
+        code = generate_code()
+        if code not in used_set:
+            used_codes.append(code)
+            save_used_codes(used_codes)
+            return code
+
+    raise Exception("Не удалось создать уникальный код")
+
+
+def choose_weighted_prize(prizes):
+    active_prizes = [p for p in prizes if p.get("active", True)]
+    if not active_prizes:
+        return None
+
+    weighted = []
+    for prize in active_prizes:
+        weight = int(prize.get("weight", 1) or 1)
+        weighted.extend([prize] * max(1, weight))
+
+    return random.choice(weighted)
+
+
+def today_key_msk():
+    utc_now = datetime.now(timezone.utc)
+    msk_now = utc_now + timedelta(hours=3)
+    return msk_now.strftime("%Y-%m-%d")
+
+
+def find_user_spin_today(user_id):
+    items = load_user_history(user_id)
+    key = today_key_msk()
+    for item in items:
+        if item.get("spin_date_msk") == key:
+            return item
     return None
 
 
+def is_admin(user):
+    if not user:
+        return False
+    try:
+        return int(user["id"]) in ADMIN_IDS
+    except Exception:
+        return False
+
+
+def serialize_prize(prize):
+    return {
+        "id": prize.get("id"),
+        "title": prize.get("title"),
+        "short": prize.get("short"),
+        "description": prize.get("description"),
+        "weight": prize.get("weight", 1),
+        "active": prize.get("active", True),
+    }
+
+
 @app.get("/")
-async def root():
-    ensure_data_files()
-    return {
-        "ok": True,
-        "service": "igadget-wheel-bot",
-        "data_dir": DATA_DIR,
-        "prizes_file": PRIZES_FILE,
-        "used_codes_file": USED_CODES_FILE,
-        "volume_mount_path": os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ""),
-        "prizes_exists": os.path.exists(PRIZES_FILE),
-        "used_codes_exists": os.path.exists(USED_CODES_FILE)
-    }
-
-
-@app.get("/debug/files")
-async def debug_files():
-    ensure_data_files()
-
-    dir_exists = os.path.exists(DATA_DIR)
-    dir_items = []
-    if dir_exists:
-        try:
-            dir_items = os.listdir(DATA_DIR)
-        except Exception as e:
-            dir_items = [f"list_error: {str(e)}"]
-
-    return {
-        "ok": True,
-        "data_dir": DATA_DIR,
-        "data_dir_exists": dir_exists,
-        "data_dir_items": dir_items,
-        "volume_mount_path": os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ""),
-        "prizes_file_info": safe_file_info(PRIZES_FILE),
-        "used_codes_file_info": safe_file_info(USED_CODES_FILE)
-    }
+def root():
+    return {"ok": True, "message": "Wheel API is running"}
 
 
 @app.get("/prizes")
-async def prizes_endpoint():
-    prizes = get_active_prizes()
-    result = []
-    for idx, prize in enumerate(prizes):
-        result.append({
-            "id": prize.get("id", idx + 1),
-            "title": prize.get("title", "Приз"),
-            "short": prize.get("short") or prize.get("title", "Приз"),
-            "description": prize.get("description", ""),
-            "weight": prize.get("weight", 1)
-        })
-    return {"ok": True, "items": result}
+def prizes():
+    items = load_prizes()
+    active = [serialize_prize(x) for x in items if x.get("active", True)]
+    return {"ok": True, "items": active}
 
 
 @app.post("/spin")
-async def spin(req: SpinRequest):
-    auth = validate_init_data(req.init_data, BOT_TOKEN)
+async def spin(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
 
-    if not auth:
+    user = get_user_from_init_data(init_data)
+    if not user:
+        return JSONResponse(
+            {"ok": False, "error": "Не удалось авторизовать пользователя"},
+            status_code=401
+        )
+
+    user_id = str(user["id"])
+    existing_today = find_user_spin_today(user_id)
+
+    if existing_today:
         return {
             "ok": False,
-            "error": "Не удалось проверить Telegram-пользователя"
+            "cooldown": True,
+            "error": "Сегодня вы уже использовали попытку.",
+            "last_code": existing_today.get("code"),
+            "last_prize_title": existing_today.get("prize_title"),
+            "last_expires_at_text": existing_today.get("expires_at_text"),
         }
 
-    user_id = auth["user_id"]
-    username = auth["username"]
-    first_name = auth["first_name"]
+    prizes = load_prizes()
+    prize = choose_weighted_prize(prizes)
+    if not prize:
+        return JSONResponse(
+            {"ok": False, "error": "Нет активных призов"},
+            status_code=400
+        )
 
-    prizes = get_active_prizes()
-    if not prizes:
-        return {"ok": False, "error": "Нет активных призов"}
+    code = generate_unique_code()
 
-    used = load_used_codes()
-    last_spin = find_last_spin_by_user_id(user_id, used)
+    created_at = datetime.utcnow()
+    expires_at = created_at + timedelta(days=7)
 
-    now_utc = datetime.now(timezone.utc)
-    now_msk = now_utc.astimezone(STORE_TIMEZONE)
-
-    if last_spin:
-        last_spin_time = parse_dt(last_spin["created_at"])
-        last_spin_msk = last_spin_time.astimezone(STORE_TIMEZONE)
-
-        if last_spin_msk.date() == now_msk.date():
-            resp = {
-                "ok": False,
-                "error": "Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
-                "cooldown": True,
-                "next_spin_at_text": format_next_spin_time_moscow(),
-                "last_code": last_spin.get("code", ""),
-                "last_prize_title": last_spin.get("prize_title", ""),
-                "last_prize_id": last_spin.get("prize_id"),
-                "last_prize_short": last_spin.get("prize_short", "")
-            }
-            if last_spin.get("expires_at"):
-                resp["expires_at"] = last_spin["expires_at"]
-                resp["expires_at_text"] = format_dt_msk(parse_dt(last_spin["expires_at"]))
-            return resp
-
-    prize = weighted_pick(prizes)
-    code = generate_code()
-    expires_at = now_utc + timedelta(days=7)
-
-    record = {
+    history_item = {
+        "id": int(created_at.timestamp() * 1000),
         "user_id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "code": code,
+        "telegram_id": user_id,
+        "first_name": user.get("first_name"),
+        "username": user.get("username"),
         "prize_id": prize.get("id"),
-        "prize_title": prize["title"],
-        "prize_short": prize.get("short", prize["title"]),
-        "prize_description": prize["description"],
-        "created_at": now_utc.isoformat(),
-        "expires_at": expires_at.isoformat(),
+        "prize_title": prize.get("title"),
+        "prize_description": prize.get("description", ""),
+        "code": code,
         "redeemed": False,
-        "redeemed_at": None,
-        "redeemed_by": None
+        "created_at": created_at.isoformat(),
+        "created_at_text": created_at.strftime("%d.%m.%Y %H:%M"),
+        "expires_at": expires_at.isoformat(),
+        "expires_at_text": expires_at.strftime("%d.%m.%Y"),
+        "spin_date_msk": today_key_msk(),
     }
 
-    used.append(record)
-    save_used_codes(used)
-
-    username_part = f"@{username}" if username else "без username"
-    first_name_part = first_name if first_name else "Без имени"
-
-    text = (
-        f"🎁 Новый выигрыш\n"
-        f"Имя: {first_name_part}\n"
-        f"Username: {username_part}\n"
-        f"User ID: {user_id}\n"
-        f"Приз: {prize['title']}\n"
-        f"Коротко на колесе: {prize.get('short', '—')}\n"
-        f"Описание: {prize['description']}\n"
-        f"Код: {code}\n"
-        f"Действителен до: {format_dt_msk(expires_at)}\n"
-        f"Время UTC: {record['created_at']}\n"
-        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, text)
-        except Exception:
-            pass
+    history = load_history()
+    history.append(history_item)
+    save_history(history)
 
     return {
         "ok": True,
         "prize_id": prize.get("id"),
-        "prize_title": prize["title"],
-        "prize_short": prize.get("short", prize["title"]),
-        "prize_description": prize["description"],
+        "prize_title": prize.get("title"),
+        "prize_description": prize.get("description", ""),
         "code": code,
         "expires_at": expires_at.isoformat(),
-        "expires_at_text": format_dt_msk(expires_at)
+        "expires_at_text": expires_at.strftime("%d.%m.%Y"),
     }
+
+
+@app.post("/history")
+async def history(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not user:
+        return JSONResponse({"ok": False, "items": []}, status_code=401)
+
+    items = load_user_history(str(user["id"]))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/me")
-async def admin_me(req: AdminInitDataRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
+async def admin_me(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
     return {
         "ok": True,
-        "user_id": auth["user_id"],
-        "username": auth["username"],
-        "first_name": auth["first_name"]
+        "telegram_id": user["id"],
+        "first_name": user.get("first_name"),
+        "username": user.get("username"),
     }
 
 
 @app.post("/admin/prizes")
-async def admin_prizes(req: AdminInitDataRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
+async def admin_prizes(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
 
-    return {
-        "ok": True,
-        "items": load_prizes(),
-        "admin_id": auth["user_id"]
-    }
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    items = load_prizes()
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/prize/add")
-async def admin_prize_add(req: AdminPrizeCreateRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
+async def admin_prize_add(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
 
-    if not req.title.strip():
-        return {"ok": False, "error": "Введите название приза"}
-    if not req.short.strip():
-        return {"ok": False, "error": "Введите короткую подпись"}
-    if not req.description.strip():
-        return {"ok": False, "error": "Введите описание"}
-    if req.weight <= 0:
-        return {"ok": False, "error": "Вес должен быть больше 0"}
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
     prizes = load_prizes()
-    new_prize = {
-        "id": get_next_prize_id(prizes),
-        "title": req.title.strip(),
-        "short": req.short.strip(),
-        "description": req.description.strip(),
-        "weight": int(req.weight),
-        "active": bool(req.active)
+    next_id = max([int(x.get("id", 0)) for x in prizes], default=0) + 1
+
+    item = {
+        "id": next_id,
+        "title": str(data.get("title", "")).strip(),
+        "short": str(data.get("short", "")).strip(),
+        "description": str(data.get("description", "")).strip(),
+        "weight": max(1, int(data.get("weight", 1))),
+        "active": bool(data.get("active", True)),
     }
-    prizes.append(new_prize)
+
+    if not item["title"] or not item["short"] or not item["description"]:
+        return JSONResponse({"ok": False, "error": "Заполните все поля"}, status_code=400)
+
+    prizes.append(item)
     save_prizes(prizes)
 
-    return {
-        "ok": True,
-        "message": "Приз добавлен",
-        "item": new_prize,
-        "items": prizes,
-        "admin_id": auth["user_id"]
-    }
-
-
-@app.post("/admin/prize/update-weight")
-async def admin_prize_update_weight(req: AdminPrizeUpdateWeightRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
-
-    if req.weight <= 0:
-        return {"ok": False, "error": "Вес должен быть больше 0"}
-
-    prizes = load_prizes()
-    updated = None
-    for prize in prizes:
-        if prize.get("id") == req.prize_id:
-            prize["weight"] = int(req.weight)
-            updated = prize
-            break
-
-    if not updated:
-        return {"ok": False, "error": "Приз не найден"}
-
-    save_prizes(prizes)
-
-    return {
-        "ok": True,
-        "message": "Вес обновлён",
-        "item": updated,
-        "items": prizes,
-        "admin_id": auth["user_id"]
-    }
-
-
-@app.post("/admin/prize/toggle")
-async def admin_prize_toggle(req: AdminPrizeToggleRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
-
-    prizes = load_prizes()
-    updated = None
-    for prize in prizes:
-        if prize.get("id") == req.prize_id:
-            prize["active"] = not prize.get("active", False)
-            updated = prize
-            break
-
-    if not updated:
-        return {"ok": False, "error": "Приз не найден"}
-
-    save_prizes(prizes)
-
-    return {
-        "ok": True,
-        "message": "Статус изменён",
-        "item": updated,
-        "items": prizes,
-        "admin_id": auth["user_id"]
-    }
-
-
-@app.post("/admin/prize/delete")
-async def admin_prize_delete(req: AdminPrizeDeleteRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
-
-    prizes = load_prizes()
-    target = None
-    new_prizes = []
-
-    for prize in prizes:
-        if prize.get("id") == req.prize_id:
-            target = prize
-        else:
-            new_prizes.append(prize)
-
-    if not target:
-        return {"ok": False, "error": "Приз не найден"}
-
-    save_prizes(new_prizes)
-
-    return {
-        "ok": True,
-        "message": "Приз удалён",
-        "item": target,
-        "items": new_prizes,
-        "admin_id": auth["user_id"]
-    }
+    prizes.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes}
 
 
 @app.post("/admin/prize/update")
-async def admin_prize_update(req: AdminPrizeUpdateRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
+async def admin_prize_update(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
 
-    if not req.title.strip():
-        return {"ok": False, "error": "Введите название приза"}
-    if not req.short.strip():
-        return {"ok": False, "error": "Введите короткую подпись"}
-    if not req.description.strip():
-        return {"ok": False, "error": "Введите описание"}
-    if req.weight <= 0:
-        return {"ok": False, "error": "Вес должен быть больше 0"}
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
+    prize_id = int(data.get("prize_id"))
     prizes = load_prizes()
-    updated = None
 
-    for prize in prizes:
-        if prize.get("id") == req.prize_id:
-            prize["title"] = req.title.strip()
-            prize["short"] = req.short.strip()
-            prize["description"] = req.description.strip()
-            prize["weight"] = int(req.weight)
-            prize["active"] = bool(req.active)
-            updated = prize
-            break
+    target = next((x for x in prizes if int(x.get("id")) == prize_id), None)
+    if not target:
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
 
-    if not updated:
-        return {"ok": False, "error": "Приз не найден"}
+    target["title"] = str(data.get("title", "")).strip()
+    target["short"] = str(data.get("short", "")).strip()
+    target["description"] = str(data.get("description", "")).strip()
+    target["weight"] = max(1, int(data.get("weight", 1)))
+    target["active"] = bool(data.get("active", True))
 
     save_prizes(prizes)
+    prizes.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes}
 
-    return {
-        "ok": True,
-        "message": "Приз обновлён",
-        "item": updated,
-        "items": prizes,
-        "admin_id": auth["user_id"]
-    }
+
+@app.post("/admin/prize/update-weight")
+async def admin_prize_update_weight(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    weight = max(1, int(data.get("weight", 1)))
+
+    prizes = load_prizes()
+    target = next((x for x in prizes if int(x.get("id")) == prize_id), None)
+    if not target:
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
+
+    target["weight"] = weight
+    save_prizes(prizes)
+
+    prizes.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes}
+
+
+@app.post("/admin/prize/toggle")
+async def admin_prize_toggle(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    prizes = load_prizes()
+
+    target = next((x for x in prizes if int(x.get("id")) == prize_id), None)
+    if not target:
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
+
+    target["active"] = not bool(target.get("active", True))
+    save_prizes(prizes)
+
+    prizes.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes}
+
+
+@app.post("/admin/prize/delete")
+async def admin_prize_delete(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    history = load_history()
+    linked = next((x for x in history if int(x.get("prize_id", 0)) == prize_id), None)
+    if linked:
+        return JSONResponse(
+            {"ok": False, "error": "Нельзя удалить приз, который уже есть в истории"},
+            status_code=400
+        )
+
+    prizes = load_prizes()
+    prizes = [x for x in prizes if int(x.get("id")) != prize_id]
+    save_prizes(prizes)
+
+    prizes.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes}
 
 
 @app.post("/admin/code/check")
-async def admin_code_check(req: AdminCodeCheckRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
+async def admin_code_check(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+    code = str(data.get("code", "")).strip()
 
-    code = req.code.strip().upper()
-    used = load_used_codes()
-    record = find_code_record(code, used)
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    if not record:
+    history = load_history()
+    item = next((x for x in history if x.get("code") == code), None)
+    if not item:
         return {"ok": False, "error": "Код не найден"}
-
-    redeemed = record.get("redeemed", False)
-    expired = is_code_expired(record)
 
     return {
         "ok": True,
-        "code": record.get("code", ""),
-        "prize_title": record.get("prize_title", ""),
-        "first_name": record.get("first_name", ""),
-        "username": record.get("username", ""),
-        "user_id": record.get("user_id"),
-        "created_at": record.get("created_at"),
-        "expires_at": record.get("expires_at"),
-        "redeemed": redeemed,
-        "redeemed_at": record.get("redeemed_at"),
-        "redeemed_by": record.get("redeemed_by"),
-        "expired": expired,
-        "admin_id": auth["user_id"]
+        "code": item.get("code"),
+        "redeemed": item.get("redeemed", False),
+        "prize_title": item.get("prize_title", "Приз"),
     }
 
 
 @app.post("/admin/code/redeem")
-async def admin_code_redeem(req: AdminCodeRedeemRequest):
-    auth, error = require_admin_from_init_data(req.init_data)
-    if error:
-        return error
+async def admin_code_redeem(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+    code = str(data.get("code", "")).strip()
 
-    code = req.code.strip().upper()
-    used = load_used_codes()
-    record = find_code_record(code, used)
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    if not record:
+    history = load_history()
+    item = next((x for x in history if x.get("code") == code), None)
+    if not item:
         return {"ok": False, "error": "Код не найден"}
 
-    if is_code_expired(record):
-        return {
-            "ok": False,
-            "error": "Код просрочен и не может быть погашен",
-            "code": record.get("code", ""),
-            "prize_title": record.get("prize_title", "")
-        }
-
-    if record.get("redeemed", False):
+    if item.get("redeemed"):
         return {
             "ok": False,
             "error": "Код уже погашен",
-            "code": record.get("code", ""),
-            "redeemed_at": record.get("redeemed_at"),
-            "redeemed_by": record.get("redeemed_by")
+            "code": item.get("code"),
+            "prize_title": item.get("prize_title", "Приз"),
         }
 
-    now_utc = datetime.now(timezone.utc)
-    now_msk = now_utc.astimezone(STORE_TIMEZONE)
-
-    staff_name = auth.get("first_name") or "Администратор"
-    staff_username = f"@{auth.get('username')}" if auth.get("username") else "без username"
-
-    record["redeemed"] = True
-    record["redeemed_at"] = now_utc.isoformat()
-    record["redeemed_by"] = f"{staff_name} ({staff_username}, id={auth['user_id']})"
-
-    save_used_codes(used)
-
-    client_username = f"@{record.get('username')}" if record.get("username") else "без username"
-    notify_text = (
-        f"✅ Код погашен\n"
-        f"Код: {record.get('code', '—')}\n"
-        f"Приз: {record.get('prize_title', '—')}\n"
-        f"Клиент: {record.get('first_name') or 'Без имени'}\n"
-        f"Username клиента: {client_username}\n"
-        f"Погасил: {staff_name} ({staff_username})\n"
-        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, notify_text)
-        except Exception:
-            pass
+    item["redeemed"] = True
+    save_history(history)
 
     return {
         "ok": True,
-        "message": "Код погашен",
-        "code": record.get("code", ""),
-        "prize_title": record.get("prize_title", ""),
-        "redeemed": True,
-        "redeemed_at": record.get("redeemed_at"),
-        "redeemed_by": record.get("redeemed_by"),
-        "admin_id": auth["user_id"]
+        "code": item.get("code"),
+        "prize_title": item.get("prize_title", "Приз"),
     }
-
-
-@dp.message(Command("start"))
-async def start_cmd(message: Message):
-    user_id = message.from_user.id
-
-    if is_admin(user_id):
-        await message.answer(
-            "Откройте Mini App через кнопку ниже.\n\n"
-            "Команды владельца:\n"
-            "/admin — управление призами\n"
-            "/check КОД — проверить код\n"
-            "/redeem КОД — погасить код",
-            reply_markup=wheel_keyboard()
-        )
-        return
-
-    if is_staff(user_id):
-        await message.answer(
-            "Откройте Mini App через кнопку ниже.\n\n"
-            "Служебные команды:\n"
-            "/check КОД — проверить код\n"
-            "/redeem КОД — погасить код",
-            reply_markup=wheel_keyboard()
-        )
-        return
-
-    await message.answer(
-        "Нажмите кнопку ниже и крутите колесо бонусов.",
-        reply_markup=wheel_keyboard()
-    )
-
-
-@dp.message(Command("admin"))
-async def admin_cmd(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await message.answer("У вас нет доступа к админ-панели.")
-        return
-    await state.clear()
-    await message.answer("Панель управления призами:", reply_markup=admin_menu())
-
-
-@dp.callback_query(F.data == "admin:list")
-async def admin_list(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    await callback.message.answer(format_prizes_text(), reply_markup=admin_menu())
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:add")
-async def admin_add_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(AddPrizeStates.title)
-    await callback.message.answer("Введите полное название нового приза:")
-    await callback.answer()
-
-
-@dp.message(AddPrizeStates.title)
-async def admin_add_title(message: Message, state: FSMContext):
-    await state.update_data(title=message.text.strip())
-    await state.set_state(AddPrizeStates.short)
-    await message.answer("Введите короткую подпись для колеса, например: -10%, 500 ₽, 2x бонус")
-
-
-@dp.message(AddPrizeStates.short)
-async def admin_add_short(message: Message, state: FSMContext):
-    await state.update_data(short=message.text.strip())
-    await state.set_state(AddPrizeStates.description)
-    await message.answer("Введите описание приза:")
-
-
-@dp.message(AddPrizeStates.description)
-async def admin_add_description(message: Message, state: FSMContext):
-    await state.update_data(description=message.text.strip())
-    await state.set_state(AddPrizeStates.weight)
-    await message.answer("Введите вес приза, например 25:")
-
-
-@dp.message(AddPrizeStates.weight)
-async def admin_add_weight(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("Вес должен быть целым числом. Введите ещё раз:")
-        return
-
-    await state.update_data(weight=int(text))
-    await state.set_state(AddPrizeStates.active)
-    await message.answer("Приз активен? Ответьте: да или нет")
-
-
-@dp.message(AddPrizeStates.active)
-async def admin_add_active(message: Message, state: FSMContext):
-    text = message.text.strip().lower()
-    if text not in ["да", "нет"]:
-        await message.answer("Введите только: да или нет")
-        return
-
-    data = await state.get_data()
-    prizes = load_prizes()
-
-    new_prize = {
-        "id": get_next_prize_id(prizes),
-        "title": data["title"],
-        "short": data["short"],
-        "description": data["description"],
-        "weight": data["weight"],
-        "active": text == "да"
-    }
-
-    prizes.append(new_prize)
-    save_prizes(prizes)
-    await state.clear()
-
-    await message.answer(
-        f"Приз добавлен:\n"
-        f"ID: {new_prize['id']}\n"
-        f"Название: {new_prize['title']}\n"
-        f"Коротко: {new_prize['short']}\n"
-        f"Вес: {new_prize['weight']}\n"
-        f"Активен: {'да' if new_prize['active'] else 'нет'}",
-        reply_markup=admin_menu()
-    )
-
-
-@dp.callback_query(F.data == "admin:edit_weight")
-async def admin_edit_weight_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(EditWeightStates.prize_id)
-    await callback.message.answer(format_prizes_text())
-    await callback.message.answer("Введите ID приза, у которого нужно изменить вес:")
-    await callback.answer()
-
-
-@dp.message(EditWeightStates.prize_id)
-async def admin_edit_weight_id(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("ID должен быть числом. Введите ещё раз:")
-        return
-
-    prize_id = int(text)
-    prize = find_prize_by_id(prize_id)
-    if not prize:
-        await message.answer("Приз с таким ID не найден. Введите ещё раз:")
-        return
-
-    await state.update_data(prize_id=prize_id)
-    await state.set_state(EditWeightStates.weight)
-    await message.answer(f"Введите новый вес для приза «{prize['title']}»:")
-
-
-@dp.message(EditWeightStates.weight)
-async def admin_edit_weight_value(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("Вес должен быть числом. Введите ещё раз:")
-        return
-
-    data = await state.get_data()
-    prize_id = data["prize_id"]
-    new_weight = int(text)
-
-    prizes = load_prizes()
-    updated = None
-    for prize in prizes:
-        if prize.get("id") == prize_id:
-            prize["weight"] = new_weight
-            updated = prize
-            break
-
-    save_prizes(prizes)
-    await state.clear()
-
-    await message.answer(
-        f"Вес обновлён.\n"
-        f"ID: {updated['id']}\n"
-        f"Название: {updated['title']}\n"
-        f"Новый вес: {updated['weight']}",
-        reply_markup=admin_menu()
-    )
-
-
-@dp.callback_query(F.data == "admin:toggle")
-async def admin_toggle_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(TogglePrizeStates.prize_id)
-    await callback.message.answer(format_prizes_text())
-    await callback.message.answer("Введите ID приза, который нужно включить или выключить:")
-    await callback.answer()
-
-
-@dp.message(TogglePrizeStates.prize_id)
-async def admin_toggle_finish(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("ID должен быть числом. Введите ещё раз:")
-        return
-
-    prize_id = int(text)
-    prizes = load_prizes()
-    updated = None
-
-    for prize in prizes:
-        if prize.get("id") == prize_id:
-            prize["active"] = not prize.get("active", False)
-            updated = prize
-            break
-
-    if not updated:
-        await message.answer("Приз с таким ID не найден.")
-        return
-
-    save_prizes(prizes)
-    await state.clear()
-
-    await message.answer(
-        f"Статус приза изменён.\n"
-        f"ID: {updated['id']}\n"
-        f"Название: {updated['title']}\n"
-        f"Теперь: {'включен' if updated['active'] else 'выключен'}",
-        reply_markup=admin_menu()
-    )
-
-
-@dp.callback_query(F.data == "admin:delete")
-async def admin_delete_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    await state.clear()
-    await state.set_state(DeletePrizeStates.prize_id)
-    await callback.message.answer(format_prizes_text())
-    await callback.message.answer("Введите ID приза, который нужно удалить:")
-    await callback.answer()
-
-
-@dp.message(DeletePrizeStates.prize_id)
-async def admin_delete_finish(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("ID должен быть числом. Введите ещё раз:")
-        return
-
-    prize_id = int(text)
-    prizes = load_prizes()
-
-    target = None
-    new_prizes = []
-    for prize in prizes:
-        if prize.get("id") == prize_id:
-            target = prize
-        else:
-            new_prizes.append(prize)
-
-    if not target:
-        await message.answer("Приз с таким ID не найден.")
-        return
-
-    save_prizes(new_prizes)
-    await state.clear()
-
-    await message.answer(
-        f"Приз удалён.\n"
-        f"ID: {target['id']}\n"
-        f"Название: {target['title']}",
-        reply_markup=admin_menu()
-    )
-
-
-@dp.message(Command("check"))
-async def check_code_cmd(message: Message):
-    if not is_staff(message.from_user.id):
-        await message.answer("У вас нет доступа к этой команде.")
-        return
-
-    parts = message.text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("Использование: /check IG-XXXXXX")
-        return
-
-    code = parts[1].strip().upper()
-    used = load_used_codes()
-    record = find_code_record(code, used)
-
-    if not record:
-        await message.answer("Код не найден.")
-        return
-
-    redeemed = record.get("redeemed", False)
-    redeemed_text = "Да" if redeemed else "Нет"
-    username_value = f"@{record.get('username')}" if record.get("username") else "без username"
-
-    expires_text = "—"
-    expired_text = "Нет"
-    if record.get("expires_at"):
-        expires_dt = parse_dt(record["expires_at"])
-        expires_text = format_dt_msk(expires_dt)
-        expired_text = "Да" if is_code_expired(record) else "Нет"
-
-    text = (
-        f"Проверка кода\n"
-        f"Код: {record.get('code', '—')}\n"
-        f"Приз: {record.get('prize_title', '—')}\n"
-        f"Имя: {record.get('first_name') or 'Без имени'}\n"
-        f"Username: {username_value}\n"
-        f"Использован: {redeemed_text}\n"
-        f"Действителен до: {expires_text}\n"
-        f"Просрочен: {expired_text}\n"
-        f"Выдан: {record.get('created_at', '—')}"
-    )
-
-    if redeemed:
-        text += (
-            f"\nПогашен: {record.get('redeemed_at', '—')}\n"
-            f"Кем: {record.get('redeemed_by', '—')}"
-        )
-
-    await message.answer(text)
-
-
-@dp.message(Command("redeem"))
-async def redeem_code_cmd(message: Message):
-    if not is_staff(message.from_user.id):
-        await message.answer("У вас нет доступа к этой команде.")
-        return
-
-    parts = message.text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("Использование: /redeem IG-XXXXXX")
-        return
-
-    code = parts[1].strip().upper()
-    used = load_used_codes()
-    record = find_code_record(code, used)
-
-    if not record:
-        await message.answer("Код не найден.")
-        return
-
-    if is_code_expired(record):
-        expires_text = format_dt_msk(parse_dt(record["expires_at"])) if record.get("expires_at") else "—"
-        await message.answer(
-            f"Этот код просрочен и не может быть погашен.\n"
-            f"Код: {record.get('code', '—')}\n"
-            f"Приз: {record.get('prize_title', '—')}\n"
-            f"Истёк: {expires_text}"
-        )
-        return
-
-    if record.get("redeemed", False):
-        await message.answer(
-            f"Этот код уже использован.\n"
-            f"Код: {record.get('code', '—')}\n"
-            f"Погашен: {record.get('redeemed_at', '—')}\n"
-            f"Кем: {record.get('redeemed_by', '—')}"
-        )
-        return
-
-    now_utc = datetime.now(timezone.utc)
-    now_msk = now_utc.astimezone(STORE_TIMEZONE)
-    staff_name = message.from_user.full_name or "Сотрудник"
-    staff_username = f"@{message.from_user.username}" if message.from_user.username else "без username"
-
-    record["redeemed"] = True
-    record["redeemed_at"] = now_utc.isoformat()
-    record["redeemed_by"] = f"{staff_name} ({staff_username}, id={message.from_user.id})"
-
-    save_used_codes(used)
-
-    await message.answer(
-        f"Код погашен.\n"
-        f"Код: {record.get('code', '—')}\n"
-        f"Приз: {record.get('prize_title', '—')}"
-    )
-
-    client_username = f"@{record.get('username')}" if record.get("username") else "без username"
-    notify_text = (
-        f"✅ Код погашен\n"
-        f"Код: {record.get('code', '—')}\n"
-        f"Приз: {record.get('prize_title', '—')}\n"
-        f"Клиент: {record.get('first_name') or 'Без имени'}\n"
-        f"Username клиента: {client_username}\n"
-        f"Погасил: {staff_name} ({staff_username})\n"
-        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, notify_text)
-        except Exception:
-            pass
-
-
-def main():
-    ensure_data_files()
-
-    async def runner():
-        await bot.delete_webhook(drop_pending_updates=False)
-        bot_task = asyncio.create_task(dp.start_polling(bot))
-        config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-        server = uvicorn.Server(config)
-        await server.serve()
-        await bot_task
-
-    asyncio.run(runner())
-
-
-if __name__ == "__main__":
-    main()
