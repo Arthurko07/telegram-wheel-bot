@@ -1,30 +1,50 @@
 [
   {
     "id": 1,
-    "title": "5% скидка",
-    "description": "Скидка на любую покупку в iGadget",
-    "weight": 18,
+    "title": "Двойное начисление бонусов",
+    "short": "2x бонус",
+    "description": "Получите двойное начисление бонусов на покупку",
+    "weight": 20,
     "active": true
   },
   {
     "id": 2,
-    "title": "10% скидка",
-    "description": "Повышенная скидка на один заказ",
-    "weight": 12,
-    "active": true
-  },
-  {
-    "id": 3,
-    "title": "Бесплатная доставка",
-    "description": "Доставка за наш счёт",
+    "title": "Скидка на зарядку 10%",
+    "short": "Зарядка -10%",
+    "description": "Скидка 10% на зарядные устройства",
     "weight": 16,
     "active": true
   },
   {
-    "id": 4,
-    "title": "Подарок к заказу",
-    "description": "Небольшой аксессуар в подарок",
+    "id": 3,
+    "title": "Скидка на Power Bank 15%",
+    "short": "PB -15%",
+    "description": "Скидка 15% на Power Bank",
     "weight": 14,
+    "active": true
+  },
+  {
+    "id": 4,
+    "title": "Скидка 500 ₽ на аксессуары",
+    "short": "500 ₽",
+    "description": "Скидка 500 рублей на аксессуары",
+    "weight": 12,
+    "active": true
+  },
+  {
+    "id": 5,
+    "title": "Подарок к покупке",
+    "short": "Подарок",
+    "description": "Подарок к покупке в магазине iGadget",
+    "weight": 10,
+    "active": true
+  },
+  {
+    "id": 6,
+    "title": "Бесплатная доставка",
+    "short": "Доставка",
+    "description": "Бесплатная доставка заказа",
+    "weight": 8,
     "active": true
   }
 ]
