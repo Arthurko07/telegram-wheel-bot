@@ -5,20 +5,26 @@ import hashlib
 import random
 import string
 import urllib.parse
-import asyncio
-import threading
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
-
+from aiogram.types import (
+    Message,
+    WebAppInfo,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Update,
+)
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+BACKEND_URL = os.getenv("BACKEND_URL", "").strip()
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "igadget-wheel-secret").strip()
 ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
@@ -28,18 +34,13 @@ ADMIN_IDS = {
 PRIZES_FILE = "prizes.json"
 USED_CODES_FILE = "used_codes.json"
 HISTORY_FILE = "history.json"
+WEBHOOK_PATH = "/telegram-webhook"
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-app = FastAPI(title="iGadget Wheel API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 def read_json_file(path, default):
@@ -131,7 +132,7 @@ def validate_init_data(init_data: str):
 
     data = parse_init_data(init_data)
     received_hash = data.pop("hash", None)
-    if not received_hash or not BOT_TOKEN:
+    if not received_hash:
         return None
 
     data_check_arr = [f"{k}={v}" for k, v in sorted(data.items())]
@@ -213,7 +214,7 @@ def generate_unique_code():
             save_used_codes(used_codes)
             return code
 
-    raise Exception("Не удалось создать уникальный код")
+    raise RuntimeError("Could not generate unique code")
 
 
 def choose_weighted_prize(prizes):
@@ -277,7 +278,7 @@ async def start_handler(message: Message):
 
 
 @dp.message(F.text == "Бонусы iGadget")
-async def text_bonus_handler(message: Message):
+async def bonus_text_handler(message: Message):
     if not WEBAPP_URL:
         await message.answer("Не задан WEBAPP_URL в переменных окружения.")
         return
@@ -296,9 +297,47 @@ async def text_bonus_handler(message: Message):
     await message.answer("Откройте Mini App по кнопке ниже.", reply_markup=kb)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    webhook_url = f"{BACKEND_URL.rstrip('/')}{WEBHOOK_PATH}" if BACKEND_URL else ""
+
+    if webhook_url.startswith("https://"):
+        await bot.set_webhook(
+            url=webhook_url,
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True,
+        )
+    yield
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+    finally:
+        await bot.session.close()
+
+
+app = FastAPI(title="iGadget Wheel API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/")
 def root():
     return {"ok": True, "message": "Wheel API is running"}
+
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "bot": True,
+        "webapp_url_set": bool(WEBAPP_URL),
+        "backend_url_set": bool(BACKEND_URL),
+    }
 
 
 @app.get("/prizes")
@@ -391,18 +430,227 @@ async def history(request: Request):
     return {"ok": True, "items": items}
 
 
-async def run_bot():
-    await dp.start_polling(bot)
+@app.post("/admin/me")
+async def admin_me(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    return {
+        "ok": True,
+        "telegram_id": user["id"],
+        "first_name": user.get("first_name"),
+        "username": user.get("username"),
+    }
 
 
-def start_bot_in_thread():
-    def runner():
-        asyncio.run(run_bot())
+@app.post("/admin/prizes")
+async def admin_prizes(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
 
-    thread = threading.Thread(target=runner, daemon=True)
-    thread.start()
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    items = load_prizes()
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
-@app.on_event("startup")
-async def on_startup():
-    start_bot_in_thread()
+@app.post("/admin/prize/add")
+async def admin_prize_add(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prizes_data = load_prizes()
+    next_id = max([int(x.get("id", 0)) for x in prizes_data], default=0) + 1
+
+    item = {
+        "id": next_id,
+        "title": str(data.get("title", "")).strip(),
+        "short": str(data.get("short", "")).strip(),
+        "description": str(data.get("description", "")).strip(),
+        "weight": max(1, int(data.get("weight", 1))),
+        "active": bool(data.get("active", True)),
+    }
+
+    if not item["title"] or not item["short"] or not item["description"]:
+        return JSONResponse({"ok": False, "error": "Заполните все поля"}, status_code=400)
+
+    prizes_data.append(item)
+    save_prizes(prizes_data)
+    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes_data}
+
+
+@app.post("/admin/prize/update")
+async def admin_prize_update(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    prizes_data = load_prizes()
+
+    target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
+    if not target:
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
+
+    target["title"] = str(data.get("title", "")).strip()
+    target["short"] = str(data.get("short", "")).strip()
+    target["description"] = str(data.get("description", "")).strip()
+    target["weight"] = max(1, int(data.get("weight", 1)))
+    target["active"] = bool(data.get("active", True))
+
+    save_prizes(prizes_data)
+    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes_data}
+
+
+@app.post("/admin/prize/update-weight")
+async def admin_prize_update_weight(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    weight = max(1, int(data.get("weight", 1)))
+
+    prizes_data = load_prizes()
+    target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
+    if not target:
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
+
+    target["weight"] = weight
+    save_prizes(prizes_data)
+    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes_data}
+
+
+@app.post("/admin/prize/toggle")
+async def admin_prize_toggle(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    prizes_data = load_prizes()
+
+    target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
+    if not target:
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
+
+    target["active"] = not bool(target.get("active", True))
+    save_prizes(prizes_data)
+    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes_data}
+
+
+@app.post("/admin/prize/delete")
+async def admin_prize_delete(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    prize_id = int(data.get("prize_id"))
+    history_data = load_history()
+    linked = next((x for x in history_data if int(x.get("prize_id", 0)) == prize_id), None)
+    if linked:
+        return JSONResponse(
+            {"ok": False, "error": "Нельзя удалить приз, который уже есть в истории"},
+            status_code=400
+        )
+
+    prizes_data = load_prizes()
+    prizes_data = [x for x in prizes_data if int(x.get("id")) != prize_id]
+    save_prizes(prizes_data)
+    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": prizes_data}
+
+
+@app.post("/admin/code/check")
+async def admin_code_check(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+    code = str(data.get("code", "")).strip()
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    history_data = load_history()
+    item = next((x for x in history_data if x.get("code") == code), None)
+    if not item:
+        return {"ok": False, "error": "Код не найден"}
+
+    return {
+        "ok": True,
+        "code": item.get("code"),
+        "redeemed": item.get("redeemed", False),
+        "prize_title": item.get("prize_title", "Приз"),
+    }
+
+
+@app.post("/admin/code/redeem")
+async def admin_code_redeem(request: Request):
+    data = await request.json()
+    init_data = data.get("init_data", "")
+    code = str(data.get("code", "")).strip()
+
+    user = get_user_from_init_data(init_data)
+    if not is_admin(user):
+        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
+
+    history_data = load_history()
+    item = next((x for x in history_data if x.get("code") == code), None)
+    if not item:
+        return {"ok": False, "error": "Код не найден"}
+
+    if item.get("redeemed"):
+        return {
+            "ok": False,
+            "error": "Код уже погашен",
+            "code": item.get("code"),
+            "prize_title": item.get("prize_title", "Приз"),
+        }
+
+    item["redeemed"] = True
+    save_history(history_data)
+
+    return {
+        "ok": True,
+        "code": item.get("code"),
+        "prize_title": item.get("prize_title", "Приз"),
+    }
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if secret != WEBHOOK_SECRET:
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+
+    data = await request.json()
+    update = Update.model_validate(data)
+    await dp.feed_update(bot, update)
+    return {"ok": True}
