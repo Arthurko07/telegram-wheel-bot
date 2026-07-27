@@ -5,23 +5,20 @@ import hashlib
 import random
 import string
 import urllib.parse
+import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import Message, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Telegram Wheel Bot API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
@@ -31,6 +28,18 @@ ADMIN_IDS = {
 PRIZES_FILE = "prizes.json"
 USED_CODES_FILE = "used_codes.json"
 HISTORY_FILE = "history.json"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+app = FastAPI(title="iGadget Wheel API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def read_json_file(path, default):
@@ -122,10 +131,7 @@ def validate_init_data(init_data: str):
 
     data = parse_init_data(init_data)
     received_hash = data.pop("hash", None)
-    if not received_hash:
-        return None
-
-    if not BOT_TOKEN:
+    if not received_hash or not BOT_TOKEN:
         return None
 
     data_check_arr = [f"{k}={v}" for k, v in sorted(data.items())]
@@ -247,15 +253,47 @@ def is_admin(user):
         return False
 
 
-def serialize_prize(prize):
-    return {
-        "id": prize.get("id"),
-        "title": prize.get("title"),
-        "short": prize.get("short"),
-        "description": prize.get("description"),
-        "weight": prize.get("weight", 1),
-        "active": prize.get("active", True),
-    }
+@dp.message(CommandStart())
+async def start_handler(message: Message):
+    if not WEBAPP_URL:
+        await message.answer("Не задан WEBAPP_URL в переменных окружения.")
+        return
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Бонусы iGadget",
+                    web_app=WebAppInfo(url=WEBAPP_URL)
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        "Добро пожаловать в iGadget Wheel.\nНажмите кнопку ниже, чтобы открыть колесо бонусов.",
+        reply_markup=kb
+    )
+
+
+@dp.message(F.text == "Бонусы iGadget")
+async def text_bonus_handler(message: Message):
+    if not WEBAPP_URL:
+        await message.answer("Не задан WEBAPP_URL в переменных окружения.")
+        return
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Открыть колесо",
+                    web_app=WebAppInfo(url=WEBAPP_URL)
+                )
+            ]
+        ]
+    )
+
+    await message.answer("Откройте Mini App по кнопке ниже.", reply_markup=kb)
 
 
 @app.get("/")
@@ -266,7 +304,7 @@ def root():
 @app.get("/prizes")
 def prizes():
     items = load_prizes()
-    active = [serialize_prize(x) for x in items if x.get("active", True)]
+    active = [x for x in items if x.get("active", True)]
     return {"ok": True, "items": active}
 
 
@@ -295,8 +333,8 @@ async def spin(request: Request):
             "last_expires_at_text": existing_today.get("expires_at_text"),
         }
 
-    prizes = load_prizes()
-    prize = choose_weighted_prize(prizes)
+    prizes_data = load_prizes()
+    prize = choose_weighted_prize(prizes_data)
     if not prize:
         return JSONResponse(
             {"ok": False, "error": "Нет активных призов"},
@@ -304,11 +342,10 @@ async def spin(request: Request):
         )
 
     code = generate_unique_code()
-
     created_at = datetime.utcnow()
     expires_at = created_at + timedelta(days=7)
 
-    history_item = {
+    item = {
         "id": int(created_at.timestamp() * 1000),
         "user_id": user_id,
         "telegram_id": user_id,
@@ -327,7 +364,7 @@ async def spin(request: Request):
     }
 
     history = load_history()
-    history.append(history_item)
+    history.append(item)
     save_history(history)
 
     return {
@@ -354,219 +391,18 @@ async def history(request: Request):
     return {"ok": True, "items": items}
 
 
-@app.post("/admin/me")
-async def admin_me(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    return {
-        "ok": True,
-        "telegram_id": user["id"],
-        "first_name": user.get("first_name"),
-        "username": user.get("username"),
-    }
+async def run_bot():
+    await dp.start_polling(bot)
 
 
-@app.post("/admin/prizes")
-async def admin_prizes(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
+def start_bot_in_thread():
+    def runner():
+        asyncio.run(run_bot())
 
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    items = load_prizes()
-    items.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": items}
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
 
 
-@app.post("/admin/prize/add")
-async def admin_prize_add(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    prizes = load_prizes()
-    next_id = max([int(x.get("id", 0)) for x in prizes], default=0) + 1
-
-    item = {
-        "id": next_id,
-        "title": str(data.get("title", "")).strip(),
-        "short": str(data.get("short", "")).strip(),
-        "description": str(data.get("description", "")).strip(),
-        "weight": max(1, int(data.get("weight", 1))),
-        "active": bool(data.get("active", True)),
-    }
-
-    if not item["title"] or not item["short"] or not item["description"]:
-        return JSONResponse({"ok": False, "error": "Заполните все поля"}, status_code=400)
-
-    prizes.append(item)
-    save_prizes(prizes)
-
-    prizes.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes}
-
-
-@app.post("/admin/prize/update")
-async def admin_prize_update(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    prize_id = int(data.get("prize_id"))
-    prizes = load_prizes()
-
-    target = next((x for x in prizes if int(x.get("id")) == prize_id), None)
-    if not target:
-        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
-
-    target["title"] = str(data.get("title", "")).strip()
-    target["short"] = str(data.get("short", "")).strip()
-    target["description"] = str(data.get("description", "")).strip()
-    target["weight"] = max(1, int(data.get("weight", 1)))
-    target["active"] = bool(data.get("active", True))
-
-    save_prizes(prizes)
-    prizes.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes}
-
-
-@app.post("/admin/prize/update-weight")
-async def admin_prize_update_weight(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    prize_id = int(data.get("prize_id"))
-    weight = max(1, int(data.get("weight", 1)))
-
-    prizes = load_prizes()
-    target = next((x for x in prizes if int(x.get("id")) == prize_id), None)
-    if not target:
-        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
-
-    target["weight"] = weight
-    save_prizes(prizes)
-
-    prizes.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes}
-
-
-@app.post("/admin/prize/toggle")
-async def admin_prize_toggle(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    prize_id = int(data.get("prize_id"))
-    prizes = load_prizes()
-
-    target = next((x for x in prizes if int(x.get("id")) == prize_id), None)
-    if not target:
-        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
-
-    target["active"] = not bool(target.get("active", True))
-    save_prizes(prizes)
-
-    prizes.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes}
-
-
-@app.post("/admin/prize/delete")
-async def admin_prize_delete(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    prize_id = int(data.get("prize_id"))
-    history = load_history()
-    linked = next((x for x in history if int(x.get("prize_id", 0)) == prize_id), None)
-    if linked:
-        return JSONResponse(
-            {"ok": False, "error": "Нельзя удалить приз, который уже есть в истории"},
-            status_code=400
-        )
-
-    prizes = load_prizes()
-    prizes = [x for x in prizes if int(x.get("id")) != prize_id]
-    save_prizes(prizes)
-
-    prizes.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes}
-
-
-@app.post("/admin/code/check")
-async def admin_code_check(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-    code = str(data.get("code", "")).strip()
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    history = load_history()
-    item = next((x for x in history if x.get("code") == code), None)
-    if not item:
-        return {"ok": False, "error": "Код не найден"}
-
-    return {
-        "ok": True,
-        "code": item.get("code"),
-        "redeemed": item.get("redeemed", False),
-        "prize_title": item.get("prize_title", "Приз"),
-    }
-
-
-@app.post("/admin/code/redeem")
-async def admin_code_redeem(request: Request):
-    data = await request.json()
-    init_data = data.get("init_data", "")
-    code = str(data.get("code", "")).strip()
-
-    user = get_user_from_init_data(init_data)
-    if not is_admin(user):
-        return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
-
-    history = load_history()
-    item = next((x for x in history if x.get("code") == code), None)
-    if not item:
-        return {"ok": False, "error": "Код не найден"}
-
-    if item.get("redeemed"):
-        return {
-            "ok": False,
-            "error": "Код уже погашен",
-            "code": item.get("code"),
-            "prize_title": item.get("prize_title", "Приз"),
-        }
-
-    item["redeemed"] = True
-    save_history(history)
-
-    return {
-        "ok": True,
-        "code": item.get("code"),
-        "prize_title": item.get("prize_title", "Приз"),
-    }
+@app.on_event("startup")
+async def on_startup():
+    start_bot_in_thread()
