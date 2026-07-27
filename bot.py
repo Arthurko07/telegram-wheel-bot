@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import asyncio
@@ -19,6 +20,14 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 USED_CODES_FILE = "used_codes.json"
 PRIZES_FILE = "prizes.json"
@@ -41,6 +50,7 @@ def save_used_codes(data):
 def generate_code():
     used = load_used_codes()
     existing = {x["code"] for x in used if "code" in x}
+
     while True:
         code = "IG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
         if code not in existing:
@@ -58,10 +68,15 @@ class SpinRequest(BaseModel):
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Открыть колесо", web_app=WebAppInfo(url=WEB_APP_URL))]],
+        keyboard=[
+            [KeyboardButton(text="Открыть колесо", web_app=WebAppInfo(url=WEB_APP_URL))]
+        ],
         resize_keyboard=True
     )
-    await message.answer("Нажмите кнопку ниже, чтобы открыть колесо бонусов.", reply_markup=kb)
+    await message.answer(
+        "Нажмите кнопку ниже, чтобы открыть колесо бонусов.",
+        reply_markup=kb
+    )
 
 @app.get("/")
 async def root():
@@ -70,6 +85,7 @@ async def root():
 @app.post("/spin")
 async def spin(req: SpinRequest):
     prizes = load_prizes()
+
     if not prizes:
         return {"ok": False, "error": "Нет активных призов"}
 
@@ -91,12 +107,16 @@ async def spin(req: SpinRequest):
     save_used_codes(used)
 
     username_part = f"@{req.username}" if req.username else "без username"
+    first_name_part = req.first_name if req.first_name else "Без имени"
+    user_id_part = req.user_id if req.user_id is not None else "не передан"
+
     text = (
         f"🎁 Новый выигрыш\n"
-        f"Имя: {req.first_name}\n"
+        f"Имя: {first_name_part}\n"
         f"Username: {username_part}\n"
-        f"User ID: {req.user_id}\n"
+        f"User ID: {user_id_part}\n"
         f"Приз: {prize['title']}\n"
+        f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
         f"Время: {record['created_at']}"
     )
@@ -120,7 +140,12 @@ async def run_bot():
 def main():
     loop = asyncio.get_event_loop()
     loop.create_task(run_bot())
-    config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000"))
+    )
     server = uvicorn.Server(config)
     loop.run_until_complete(server.serve())
 
