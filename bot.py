@@ -2,7 +2,7 @@ import os
 import json
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -31,6 +31,7 @@ app.add_middleware(
 
 USED_CODES_FILE = "used_codes.json"
 PRIZES_FILE = "prizes.json"
+SPIN_COOLDOWN_HOURS = 24
 
 def load_prizes():
     with open(PRIZES_FILE, "r", encoding="utf-8") as f:
@@ -60,6 +61,20 @@ def weighted_pick(prizes):
     weights = [p["weight"] for p in prizes]
     return random.choices(prizes, weights=weights, k=1)[0]
 
+def find_last_spin_by_user(user_id, used):
+    if user_id is None:
+        return None
+
+    user_records = [x for x in used if x.get("user_id") == user_id and x.get("created_at")]
+    if not user_records:
+        return None
+
+    user_records.sort(key=lambda x: x["created_at"], reverse=True)
+    return user_records[0]
+
+def parse_dt(dt_str):
+    return datetime.fromisoformat(dt_str)
+
 class SpinRequest(BaseModel):
     user_id: int | None = None
     username: str = ""
@@ -84,10 +99,38 @@ async def root():
 
 @app.post("/spin")
 async def spin(req: SpinRequest):
-    prizes = load_prizes()
+    if req.user_id is None:
+        return {
+            "ok": False,
+            "error": "Не удалось определить пользователя Telegram"
+        }
 
+    prizes = load_prizes()
     if not prizes:
         return {"ok": False, "error": "Нет активных призов"}
+
+    used = load_used_codes()
+    last_spin = find_last_spin_by_user(req.user_id, used)
+    now = datetime.now(timezone.utc)
+
+    if last_spin:
+        last_spin_time = parse_dt(last_spin["created_at"])
+        next_allowed_time = last_spin_time + timedelta(hours=SPIN_COOLDOWN_HOURS)
+
+        if now < next_allowed_time:
+            remaining = next_allowed_time - now
+            total_seconds = int(remaining.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+
+            return {
+                "ok": False,
+                "error": f"Вы уже крутили колесо. Следующая попытка через {hours} ч. {minutes} мин.",
+                "cooldown": True,
+                "next_spin_at": next_allowed_time.isoformat(),
+                "last_code": last_spin.get("code", ""),
+                "last_prize_title": last_spin.get("prize_title", "")
+            }
 
     prize = weighted_pick(prizes)
     code = generate_code()
@@ -99,22 +142,20 @@ async def spin(req: SpinRequest):
         "first_name": req.first_name,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
-        "created_at": datetime.utcnow().isoformat()
+        "created_at": now.isoformat()
     }
 
-    used = load_used_codes()
     used.append(record)
     save_used_codes(used)
 
     username_part = f"@{req.username}" if req.username else "без username"
     first_name_part = req.first_name if req.first_name else "Без имени"
-    user_id_part = req.user_id if req.user_id is not None else "не передан"
 
     text = (
         f"🎁 Новый выигрыш\n"
         f"Имя: {first_name_part}\n"
         f"Username: {username_part}\n"
-        f"User ID: {user_id_part}\n"
+        f"User ID: {req.user_id}\n"
         f"Приз: {prize['title']}\n"
         f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
