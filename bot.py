@@ -63,19 +63,31 @@ def weighted_pick(prizes):
     weights = [p["weight"] for p in prizes]
     return random.choices(prizes, weights=weights, k=1)[0]
 
-def find_last_spin_by_user(user_id, used):
-    if user_id is None:
-        return None
-
-    user_records = [x for x in used if x.get("user_id") == user_id and x.get("created_at")]
-    if not user_records:
-        return None
-
-    user_records.sort(key=lambda x: x["created_at"], reverse=True)
-    return user_records[0]
-
 def parse_dt(dt_str):
     return datetime.fromisoformat(dt_str)
+
+def get_identity_key(req):
+    if req.user_id is not None:
+        return f"user_id:{req.user_id}"
+
+    if req.username:
+        return f"username:{req.username.lower()}"
+
+    if req.session_id:
+        return f"session:{req.session_id}"
+
+    return None
+
+def find_last_spin_by_identity(identity_key, used):
+    if not identity_key:
+        return None
+
+    records = [x for x in used if x.get("identity_key") == identity_key and x.get("created_at")]
+    if not records:
+        return None
+
+    records.sort(key=lambda x: x["created_at"], reverse=True)
+    return records[0]
 
 def format_next_spin_time_moscow():
     now_msk = datetime.now(timezone.utc).astimezone(STORE_TIMEZONE)
@@ -93,6 +105,7 @@ class SpinRequest(BaseModel):
     user_id: int | None = None
     username: str = ""
     first_name: str = ""
+    session_id: str = ""
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
@@ -113,10 +126,12 @@ async def root():
 
 @app.post("/spin")
 async def spin(req: SpinRequest):
-    if req.user_id is None:
+    identity_key = get_identity_key(req)
+
+    if not identity_key:
         return {
             "ok": False,
-            "error": "Не удалось определить пользователя Telegram"
+            "error": "Не удалось определить пользователя"
         }
 
     prizes = load_prizes()
@@ -124,7 +139,7 @@ async def spin(req: SpinRequest):
         return {"ok": False, "error": "Нет активных призов"}
 
     used = load_used_codes()
-    last_spin = find_last_spin_by_user(req.user_id, used)
+    last_spin = find_last_spin_by_identity(identity_key, used)
 
     now_utc = datetime.now(timezone.utc)
     now_msk = now_utc.astimezone(STORE_TIMEZONE)
@@ -136,7 +151,7 @@ async def spin(req: SpinRequest):
         if last_spin_msk.date() == now_msk.date():
             return {
                 "ok": False,
-                "error": f"Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
+                "error": "Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
                 "cooldown": True,
                 "next_spin_at_text": format_next_spin_time_moscow(),
                 "last_code": last_spin.get("code", ""),
@@ -147,10 +162,12 @@ async def spin(req: SpinRequest):
     code = generate_code()
 
     record = {
+        "identity_key": identity_key,
         "code": code,
         "user_id": req.user_id,
         "username": req.username,
         "first_name": req.first_name,
+        "session_id": req.session_id,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
         "created_at": now_utc.isoformat()
@@ -161,12 +178,15 @@ async def spin(req: SpinRequest):
 
     username_part = f"@{req.username}" if req.username else "без username"
     first_name_part = req.first_name if req.first_name else "Без имени"
+    user_id_part = req.user_id if req.user_id is not None else "не передан"
 
     text = (
         f"🎁 Новый выигрыш\n"
         f"Имя: {first_name_part}\n"
         f"Username: {username_part}\n"
-        f"User ID: {req.user_id}\n"
+        f"User ID: {user_id_part}\n"
+        f"Session ID: {req.session_id or 'нет'}\n"
+        f"Identity: {identity_key}\n"
         f"Приз: {prize['title']}\n"
         f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
