@@ -1,8 +1,12 @@
 import os
 import json
+import hmac
+import hashlib
 import random
 import string
+import asyncio
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
@@ -12,7 +16,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
-import asyncio
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
@@ -67,26 +70,6 @@ def weighted_pick(prizes):
 def parse_dt(dt_str):
     return datetime.fromisoformat(dt_str)
 
-def get_identity_key(req):
-    if req.user_id is not None:
-        return f"user_id:{req.user_id}"
-    if req.username:
-        return f"username:{req.username.lower()}"
-    if req.device_id:
-        return f"device:{req.device_id}"
-    return None
-
-def find_last_spin_by_identity(identity_key, used):
-    if not identity_key:
-        return None
-
-    records = [x for x in used if x.get("identity_key") == identity_key and x.get("created_at")]
-    if not records:
-        return None
-
-    records.sort(key=lambda x: x["created_at"], reverse=True)
-    return records[0]
-
 def format_next_spin_time_moscow():
     now_msk = datetime.now(timezone.utc).astimezone(STORE_TIMEZONE)
     tomorrow = now_msk.date().fromordinal(now_msk.date().toordinal() + 1)
@@ -109,11 +92,59 @@ def find_code_record(code: str, used: list):
             return item
     return None
 
+def find_last_spin_by_user_id(user_id: int, used: list):
+    records = [x for x in used if x.get("user_id") == user_id and x.get("created_at")]
+    if not records:
+        return None
+    records.sort(key=lambda x: x["created_at"], reverse=True)
+    return records[0]
+
+def validate_init_data(init_data: str, bot_token: str):
+    try:
+        parsed = dict(parse_qsl(init_data, strict_parsing=True))
+    except ValueError:
+        return None
+
+    received_hash = parsed.pop("hash", None)
+    if not received_hash:
+        return None
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+    secret_key = hmac.new(
+        b"WebAppData",
+        bot_token.encode(),
+        hashlib.sha256
+    ).digest()
+
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        return None
+
+    user_raw = parsed.get("user")
+    if not user_raw:
+        return None
+
+    try:
+        user = json.loads(user_raw)
+    except json.JSONDecodeError:
+        return None
+
+    if "id" not in user:
+        return None
+
+    return {
+        "user_id": int(user["id"]),
+        "username": user.get("username", ""),
+        "first_name": user.get("first_name", "")
+    }
+
 class SpinRequest(BaseModel):
-    user_id: int | None = None
-    username: str = ""
-    first_name: str = ""
-    device_id: str = ""
+    init_data: str = ""
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
@@ -240,20 +271,24 @@ async def root():
 
 @app.post("/spin")
 async def spin(req: SpinRequest):
-    identity_key = get_identity_key(req)
+    auth = validate_init_data(req.init_data, BOT_TOKEN)
 
-    if not identity_key:
+    if not auth:
         return {
             "ok": False,
-            "error": "Не удалось определить пользователя"
+            "error": "Не удалось проверить Telegram-пользователя"
         }
+
+    user_id = auth["user_id"]
+    username = auth["username"]
+    first_name = auth["first_name"]
 
     prizes = load_prizes()
     if not prizes:
         return {"ok": False, "error": "Нет активных призов"}
 
     used = load_used_codes()
-    last_spin = find_last_spin_by_identity(identity_key, used)
+    last_spin = find_last_spin_by_user_id(user_id, used)
 
     now_utc = datetime.now(timezone.utc)
     now_msk = now_utc.astimezone(STORE_TIMEZONE)
@@ -276,12 +311,10 @@ async def spin(req: SpinRequest):
     code = generate_code()
 
     record = {
-        "identity_key": identity_key,
+        "user_id": user_id,
+        "username": username,
+        "first_name": first_name,
         "code": code,
-        "user_id": req.user_id,
-        "username": req.username,
-        "first_name": req.first_name,
-        "device_id": req.device_id,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
         "created_at": now_utc.isoformat(),
@@ -293,17 +326,14 @@ async def spin(req: SpinRequest):
     used.append(record)
     save_used_codes(used)
 
-    username_part = f"@{req.username}" if req.username else "без username"
-    first_name_part = req.first_name if req.first_name else "Без имени"
-    user_id_part = req.user_id if req.user_id is not None else "не передан"
+    username_part = f"@{username}" if username else "без username"
+    first_name_part = first_name if first_name else "Без имени"
 
     text = (
         f"🎁 Новый выигрыш\n"
         f"Имя: {first_name_part}\n"
         f"Username: {username_part}\n"
-        f"User ID: {user_id_part}\n"
-        f"Device ID: {req.device_id or 'нет'}\n"
-        f"Identity: {identity_key}\n"
+        f"User ID: {user_id}\n"
         f"Приз: {prize['title']}\n"
         f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
