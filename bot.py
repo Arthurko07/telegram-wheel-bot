@@ -5,7 +5,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = "https://script.google.com/macros/s/AKfycbykbHhsuM_9z71XoEmu8kNitbBZLUBTOrjd5TexM4UHI2lF6wl_SahWhEM5ThLqiE2xaQ/exec"
+WEB_APP_URL = "https://telegram-wheel-web.vercel.app"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
