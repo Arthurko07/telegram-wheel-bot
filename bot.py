@@ -5,14 +5,13 @@ import hashlib
 import random
 import string
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
@@ -102,6 +101,9 @@ def weighted_pick(prizes):
 def parse_dt(dt_str):
     return datetime.fromisoformat(dt_str)
 
+def format_dt_msk(dt_obj):
+    return dt_obj.astimezone(STORE_TIMEZONE).strftime("%d.%m.%Y %H:%M:%S МСК")
+
 def format_next_spin_time_moscow():
     now_msk = datetime.now(timezone.utc).astimezone(STORE_TIMEZONE)
     tomorrow = now_msk.date().fromordinal(now_msk.date().toordinal() + 1)
@@ -133,6 +135,14 @@ def find_last_spin_by_user_id(user_id: int, used: list):
         return None
     records.sort(key=lambda x: x["created_at"], reverse=True)
     return records[0]
+
+def is_code_expired(record: dict):
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return False
+    expires_dt = parse_dt(expires_at)
+    now_utc = datetime.now(timezone.utc)
+    return now_utc > expires_dt
 
 def validate_init_data(init_data: str, bot_token: str):
     if not init_data or not bot_token:
@@ -278,7 +288,7 @@ async def spin(req: SpinRequest):
         last_spin_msk = last_spin_time.astimezone(STORE_TIMEZONE)
 
         if last_spin_msk.date() == now_msk.date():
-            return {
+            resp = {
                 "ok": False,
                 "error": "Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
                 "cooldown": True,
@@ -286,9 +296,14 @@ async def spin(req: SpinRequest):
                 "last_code": last_spin.get("code", ""),
                 "last_prize_title": last_spin.get("prize_title", "")
             }
+            if last_spin.get("expires_at"):
+                resp["expires_at"] = last_spin["expires_at"]
+                resp["expires_at_text"] = format_dt_msk(parse_dt(last_spin["expires_at"]))
+            return resp
 
     prize = weighted_pick(prizes)
     code = generate_code()
+    expires_at = now_utc + timedelta(days=3)
 
     record = {
         "user_id": user_id,
@@ -298,6 +313,7 @@ async def spin(req: SpinRequest):
         "prize_title": prize["title"],
         "prize_description": prize["description"],
         "created_at": now_utc.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "redeemed": False,
         "redeemed_at": None,
         "redeemed_by": None
@@ -317,6 +333,7 @@ async def spin(req: SpinRequest):
         f"Приз: {prize['title']}\n"
         f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
+        f"Действителен до: {format_dt_msk(expires_at)}\n"
         f"Время UTC: {record['created_at']}\n"
         f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
     )
@@ -331,7 +348,9 @@ async def spin(req: SpinRequest):
         "ok": True,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
-        "code": code
+        "code": code,
+        "expires_at": expires_at.isoformat(),
+        "expires_at_text": format_dt_msk(expires_at)
     }
 
 @dp.message(Command("start"))
@@ -592,6 +611,13 @@ async def check_code_cmd(message: Message):
     redeemed_text = "Да" if redeemed else "Нет"
     username_value = f"@{record.get('username')}" if record.get("username") else "без username"
 
+    expires_text = "—"
+    expired_text = "Нет"
+    if record.get("expires_at"):
+        expires_dt = parse_dt(record["expires_at"])
+        expires_text = format_dt_msk(expires_dt)
+        expired_text = "Да" if is_code_expired(record) else "Нет"
+
     text = (
         f"Проверка кода\n"
         f"Код: {record.get('code', '—')}\n"
@@ -599,6 +625,8 @@ async def check_code_cmd(message: Message):
         f"Имя: {record.get('first_name') or 'Без имени'}\n"
         f"Username: {username_value}\n"
         f"Использован: {redeemed_text}\n"
+        f"Действителен до: {expires_text}\n"
+        f"Просрочен: {expired_text}\n"
         f"Выдан: {record.get('created_at', '—')}"
     )
 
@@ -627,6 +655,16 @@ async def redeem_code_cmd(message: Message):
 
     if not record:
         await message.answer("Код не найден.")
+        return
+
+    if is_code_expired(record):
+        expires_text = format_dt_msk(parse_dt(record["expires_at"])) if record.get("expires_at") else "—"
+        await message.answer(
+            f"Этот код просрочен и не может быть погашен.\n"
+            f"Код: {record.get('code', '—')}\n"
+            f"Приз: {record.get('prize_title', '—')}\n"
+            f"Истёк: {expires_text}"
+        )
         return
 
     if record.get("redeemed", False):
