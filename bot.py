@@ -130,6 +130,26 @@ class AdminPrizeDeleteRequest(BaseModel):
     prize_id: int
 
 
+class AdminPrizeUpdateRequest(BaseModel):
+    init_data: str
+    prize_id: int
+    title: str
+    short: str
+    description: str
+    weight: int
+    active: bool
+
+
+class AdminCodeCheckRequest(BaseModel):
+    init_data: str
+    code: str
+
+
+class AdminCodeRedeemRequest(BaseModel):
+    init_data: str
+    code: str
+
+
 class AddPrizeStates(StatesGroup):
     title = State()
     short = State()
@@ -728,6 +748,152 @@ async def admin_prize_delete(req: AdminPrizeDeleteRequest):
         "message": "Приз удалён",
         "item": target,
         "items": new_prizes,
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/prize/update")
+async def admin_prize_update(req: AdminPrizeUpdateRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    if not req.title.strip():
+        return {"ok": False, "error": "Введите название приза"}
+    if not req.short.strip():
+        return {"ok": False, "error": "Введите короткую подпись"}
+    if not req.description.strip():
+        return {"ok": False, "error": "Введите описание"}
+    if req.weight <= 0:
+        return {"ok": False, "error": "Вес должен быть больше 0"}
+
+    prizes = load_prizes()
+    updated = None
+
+    for prize in prizes:
+        if prize.get("id") == req.prize_id:
+            prize["title"] = req.title.strip()
+            prize["short"] = req.short.strip()
+            prize["description"] = req.description.strip()
+            prize["weight"] = int(req.weight)
+            prize["active"] = bool(req.active)
+            updated = prize
+            break
+
+    if not updated:
+        return {"ok": False, "error": "Приз не найден"}
+
+    save_prizes(prizes)
+
+    return {
+        "ok": True,
+        "message": "Приз обновлён",
+        "item": updated,
+        "items": prizes,
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/code/check")
+async def admin_code_check(req: AdminCodeCheckRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    code = req.code.strip().upper()
+    used = load_used_codes()
+    record = find_code_record(code, used)
+
+    if not record:
+        return {"ok": False, "error": "Код не найден"}
+
+    redeemed = record.get("redeemed", False)
+    expired = is_code_expired(record)
+
+    return {
+        "ok": True,
+        "code": record.get("code", ""),
+        "prize_title": record.get("prize_title", ""),
+        "first_name": record.get("first_name", ""),
+        "username": record.get("username", ""),
+        "user_id": record.get("user_id"),
+        "created_at": record.get("created_at"),
+        "expires_at": record.get("expires_at"),
+        "redeemed": redeemed,
+        "redeemed_at": record.get("redeemed_at"),
+        "redeemed_by": record.get("redeemed_by"),
+        "expired": expired,
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/code/redeem")
+async def admin_code_redeem(req: AdminCodeRedeemRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    code = req.code.strip().upper()
+    used = load_used_codes()
+    record = find_code_record(code, used)
+
+    if not record:
+        return {"ok": False, "error": "Код не найден"}
+
+    if is_code_expired(record):
+        return {
+            "ok": False,
+            "error": "Код просрочен и не может быть погашен",
+            "code": record.get("code", ""),
+            "prize_title": record.get("prize_title", "")
+        }
+
+    if record.get("redeemed", False):
+        return {
+            "ok": False,
+            "error": "Код уже погашен",
+            "code": record.get("code", ""),
+            "redeemed_at": record.get("redeemed_at"),
+            "redeemed_by": record.get("redeemed_by")
+        }
+
+    now_utc = datetime.now(timezone.utc)
+    now_msk = now_utc.astimezone(STORE_TIMEZONE)
+
+    staff_name = auth.get("first_name") or "Администратор"
+    staff_username = f"@{auth.get('username')}" if auth.get("username") else "без username"
+
+    record["redeemed"] = True
+    record["redeemed_at"] = now_utc.isoformat()
+    record["redeemed_by"] = f"{staff_name} ({staff_username}, id={auth['user_id']})"
+
+    save_used_codes(used)
+
+    client_username = f"@{record.get('username')}" if record.get("username") else "без username"
+    notify_text = (
+        f"✅ Код погашен\n"
+        f"Код: {record.get('code', '—')}\n"
+        f"Приз: {record.get('prize_title', '—')}\n"
+        f"Клиент: {record.get('first_name') or 'Без имени'}\n"
+        f"Username клиента: {client_username}\n"
+        f"Погасил: {staff_name} ({staff_username})\n"
+        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, notify_text)
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "message": "Код погашен",
+        "code": record.get("code", ""),
+        "prize_title": record.get("prize_title", ""),
+        "redeemed": True,
+        "redeemed_at": record.get("redeemed_at"),
+        "redeemed_by": record.get("redeemed_by"),
         "admin_id": auth["user_id"]
     }
 
