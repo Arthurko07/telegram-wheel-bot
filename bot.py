@@ -152,28 +152,25 @@ async def check_code_cmd(message: Message):
 
     redeemed = record.get("redeemed", False)
     redeemed_text = "Да" if redeemed else "Нет"
+    username_value = f"@{record.get('username')}" if record.get("username") else "без username"
 
     text = (
         f"Проверка кода\n"
         f"Код: {record.get('code', '—')}\n"
         f"Приз: {record.get('prize_title', '—')}\n"
         f"Имя: {record.get('first_name') or 'Без имени'}\n"
-        f"Username: @{record.get('username')}" if record.get('username') else
-        f"Проверка кода\nКод: {record.get('code', '—')}\nПриз: {record.get('prize_title', '—')}\nИмя: {record.get('first_name') or 'Без имени'}\nUsername: без username"
-    )
-
-    extra = (
-        f"\nИспользован: {redeemed_text}\n"
+        f"Username: {username_value}\n"
+        f"Использован: {redeemed_text}\n"
         f"Выдан: {record.get('created_at', '—')}"
     )
 
     if redeemed:
-        extra += (
+        text += (
             f"\nПогашен: {record.get('redeemed_at', '—')}\n"
             f"Кем: {record.get('redeemed_by', '—')}"
         )
 
-    await message.answer(text + extra)
+    await message.answer(text)
 
 @dp.message(Command("redeem"))
 async def redeem_code_cmd(message: Message):
@@ -220,23 +217,20 @@ async def redeem_code_cmd(message: Message):
         f"Приз: {record.get('prize_title', '—')}"
     )
 
+    client_username = f"@{record.get('username')}" if record.get("username") else "без username"
     notify_text = (
         f"✅ Код погашен\n"
         f"Код: {record.get('code', '—')}\n"
         f"Приз: {record.get('prize_title', '—')}\n"
         f"Клиент: {record.get('first_name') or 'Без имени'}\n"
-        f"Username клиента: @{record.get('username')}" if record.get('username') else
-        f"✅ Код погашен\nКод: {record.get('code', '—')}\nПриз: {record.get('prize_title', '—')}\nКлиент: {record.get('first_name') or 'Без имени'}\nUsername клиента: без username"
-    )
-
-    notify_tail = (
-        f"\nПогасил: {staff_name} ({staff_username})\n"
+        f"Username клиента: {client_username}\n"
+        f"Погасил: {staff_name} ({staff_username})\n"
         f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
     )
 
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, notify_text + notify_tail)
+            await bot.send_message(admin_id, notify_text)
         except Exception:
             pass
 
