@@ -101,6 +101,35 @@ class SpinRequest(BaseModel):
     init_data: str = ""
 
 
+class AdminInitDataRequest(BaseModel):
+    init_data: str = ""
+
+
+class AdminPrizeCreateRequest(BaseModel):
+    init_data: str
+    title: str
+    short: str
+    description: str
+    weight: int
+    active: bool = True
+
+
+class AdminPrizeUpdateWeightRequest(BaseModel):
+    init_data: str
+    prize_id: int
+    weight: int
+
+
+class AdminPrizeToggleRequest(BaseModel):
+    init_data: str
+    prize_id: int
+
+
+class AdminPrizeDeleteRequest(BaseModel):
+    init_data: str
+    prize_id: int
+
+
 class AddPrizeStates(StatesGroup):
     title = State()
     short = State()
@@ -132,6 +161,26 @@ def ensure_data_files():
     if not os.path.exists(USED_CODES_FILE):
         with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
             json.dump([], f, ensure_ascii=False, indent=2)
+
+
+def safe_file_info(path: str):
+    info = {
+        "path": path,
+        "exists": os.path.exists(path),
+        "is_file": os.path.isfile(path),
+        "size_bytes": None,
+        "preview": None
+    }
+
+    if os.path.isfile(path):
+        info["size_bytes"] = os.path.getsize(path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                info["preview"] = f.read(1000)
+        except Exception as e:
+            info["preview"] = f"preview_error: {str(e)}"
+
+    return info
 
 
 def load_prizes():
@@ -306,6 +355,17 @@ def validate_init_data(init_data: str, bot_token: str):
         return None
 
 
+def require_admin_from_init_data(init_data: str):
+    auth = validate_init_data(init_data, BOT_TOKEN)
+    if not auth:
+        return None, {"ok": False, "error": "Не удалось проверить Telegram-пользователя"}
+
+    if not is_admin(auth["user_id"]):
+        return None, {"ok": False, "error": "Нет доступа"}
+
+    return auth, None
+
+
 def admin_menu():
     builder = InlineKeyboardBuilder()
     builder.button(text="Список призов", callback_data="admin:list")
@@ -367,13 +427,39 @@ def find_prize_by_id(prize_id: int):
 
 @app.get("/")
 async def root():
+    ensure_data_files()
     return {
         "ok": True,
         "service": "igadget-wheel-bot",
         "data_dir": DATA_DIR,
         "prizes_file": PRIZES_FILE,
         "used_codes_file": USED_CODES_FILE,
-        "volume_mount_path": os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
+        "volume_mount_path": os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ""),
+        "prizes_exists": os.path.exists(PRIZES_FILE),
+        "used_codes_exists": os.path.exists(USED_CODES_FILE)
+    }
+
+
+@app.get("/debug/files")
+async def debug_files():
+    ensure_data_files()
+
+    dir_exists = os.path.exists(DATA_DIR)
+    dir_items = []
+    if dir_exists:
+        try:
+            dir_items = os.listdir(DATA_DIR)
+        except Exception as e:
+            dir_items = [f"list_error: {str(e)}"]
+
+    return {
+        "ok": True,
+        "data_dir": DATA_DIR,
+        "data_dir_exists": dir_exists,
+        "data_dir_items": dir_items,
+        "volume_mount_path": os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ""),
+        "prizes_file_info": safe_file_info(PRIZES_FILE),
+        "used_codes_file_info": safe_file_info(USED_CODES_FILE)
     }
 
 
@@ -491,6 +577,158 @@ async def spin(req: SpinRequest):
         "code": code,
         "expires_at": expires_at.isoformat(),
         "expires_at_text": format_dt_msk(expires_at)
+    }
+
+
+@app.post("/admin/me")
+async def admin_me(req: AdminInitDataRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    return {
+        "ok": True,
+        "user_id": auth["user_id"],
+        "username": auth["username"],
+        "first_name": auth["first_name"]
+    }
+
+
+@app.post("/admin/prizes")
+async def admin_prizes(req: AdminInitDataRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    return {
+        "ok": True,
+        "items": load_prizes(),
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/prize/add")
+async def admin_prize_add(req: AdminPrizeCreateRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    if not req.title.strip():
+        return {"ok": False, "error": "Введите название приза"}
+    if not req.short.strip():
+        return {"ok": False, "error": "Введите короткую подпись"}
+    if not req.description.strip():
+        return {"ok": False, "error": "Введите описание"}
+    if req.weight <= 0:
+        return {"ok": False, "error": "Вес должен быть больше 0"}
+
+    prizes = load_prizes()
+    new_prize = {
+        "id": get_next_prize_id(prizes),
+        "title": req.title.strip(),
+        "short": req.short.strip(),
+        "description": req.description.strip(),
+        "weight": int(req.weight),
+        "active": bool(req.active)
+    }
+    prizes.append(new_prize)
+    save_prizes(prizes)
+
+    return {
+        "ok": True,
+        "message": "Приз добавлен",
+        "item": new_prize,
+        "items": prizes,
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/prize/update-weight")
+async def admin_prize_update_weight(req: AdminPrizeUpdateWeightRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    if req.weight <= 0:
+        return {"ok": False, "error": "Вес должен быть больше 0"}
+
+    prizes = load_prizes()
+    updated = None
+    for prize in prizes:
+        if prize.get("id") == req.prize_id:
+            prize["weight"] = int(req.weight)
+            updated = prize
+            break
+
+    if not updated:
+        return {"ok": False, "error": "Приз не найден"}
+
+    save_prizes(prizes)
+
+    return {
+        "ok": True,
+        "message": "Вес обновлён",
+        "item": updated,
+        "items": prizes,
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/prize/toggle")
+async def admin_prize_toggle(req: AdminPrizeToggleRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    prizes = load_prizes()
+    updated = None
+    for prize in prizes:
+        if prize.get("id") == req.prize_id:
+            prize["active"] = not prize.get("active", False)
+            updated = prize
+            break
+
+    if not updated:
+        return {"ok": False, "error": "Приз не найден"}
+
+    save_prizes(prizes)
+
+    return {
+        "ok": True,
+        "message": "Статус изменён",
+        "item": updated,
+        "items": prizes,
+        "admin_id": auth["user_id"]
+    }
+
+
+@app.post("/admin/prize/delete")
+async def admin_prize_delete(req: AdminPrizeDeleteRequest):
+    auth, error = require_admin_from_init_data(req.init_data)
+    if error:
+        return error
+
+    prizes = load_prizes()
+    target = None
+    new_prizes = []
+
+    for prize in prizes:
+        if prize.get("id") == req.prize_id:
+            target = prize
+        else:
+            new_prizes.append(prize)
+
+    if not target:
+        return {"ok": False, "error": "Приз не найден"}
+
+    save_prizes(new_prizes)
+
+    return {
+        "ok": True,
+        "message": "Приз удалён",
+        "item": target,
+        "items": new_prizes,
+        "admin_id": auth["user_id"]
     }
 
 
@@ -900,6 +1138,7 @@ def main():
     ensure_data_files()
 
     async def runner():
+        await bot.delete_webhook(drop_pending_updates=False)
         bot_task = asyncio.create_task(dp.start_polling(bot))
         config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
         server = uvicorn.Server(config)
