@@ -72,8 +72,8 @@ def get_identity_key(req):
         return f"user_id:{req.user_id}"
     if req.username:
         return f"username:{req.username.lower()}"
-    if req.session_id:
-        return f"session:{req.session_id}"
+    if req.device_id:
+        return f"device:{req.device_id}"
     return None
 
 def find_last_spin_by_identity(identity_key, used):
@@ -113,7 +113,7 @@ class SpinRequest(BaseModel):
     user_id: int | None = None
     username: str = ""
     first_name: str = ""
-    session_id: str = ""
+    device_id: str = ""
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
@@ -281,7 +281,7 @@ async def spin(req: SpinRequest):
         "user_id": req.user_id,
         "username": req.username,
         "first_name": req.first_name,
-        "session_id": req.session_id,
+        "device_id": req.device_id,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
         "created_at": now_utc.isoformat(),
@@ -302,7 +302,7 @@ async def spin(req: SpinRequest):
         f"Имя: {first_name_part}\n"
         f"Username: {username_part}\n"
         f"User ID: {user_id_part}\n"
-        f"Session ID: {req.session_id or 'нет'}\n"
+        f"Device ID: {req.device_id or 'нет'}\n"
         f"Identity: {identity_key}\n"
         f"Приз: {prize['title']}\n"
         f"Описание: {prize['description']}\n"
