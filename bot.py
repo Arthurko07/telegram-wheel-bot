@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+from aiogram.types import Message
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -171,18 +171,11 @@ class SpinRequest(BaseModel):
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Открыть колесо", web_app=WebAppInfo(url=WEB_APP_URL))]
-        ],
-        resize_keyboard=True
-    )
     await message.answer(
-        "Нажмите кнопку ниже, чтобы открыть колесо бонусов.\n\n"
+        "Откройте Mini App через кнопку меню Telegram.\n\n"
         "Для сотрудников:\n"
         "/check КОД — проверить код\n"
-        "/redeem КОД — погасить код",
-        reply_markup=kb
+        "/redeem КОД — погасить код"
     )
 
 @dp.message(Command("check"))
