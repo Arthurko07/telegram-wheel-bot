@@ -11,15 +11,15 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import uvicorn
+from pydantic import BaseModel
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
@@ -44,8 +44,10 @@ app.add_middleware(
 USED_CODES_FILE = "used_codes.json"
 PRIZES_FILE = "prizes.json"
 
+
 class SpinRequest(BaseModel):
     init_data: str = ""
+
 
 class AddPrizeStates(StatesGroup):
     title = State()
@@ -54,15 +56,19 @@ class AddPrizeStates(StatesGroup):
     weight = State()
     active = State()
 
+
 class EditWeightStates(StatesGroup):
     prize_id = State()
     weight = State()
 
+
 class DeletePrizeStates(StatesGroup):
     prize_id = State()
 
+
 class TogglePrizeStates(StatesGroup):
     prize_id = State()
+
 
 def load_prizes():
     if not os.path.exists(PRIZES_FILE):
@@ -70,12 +76,15 @@ def load_prizes():
     with open(PRIZES_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def save_prizes(data):
     with open(PRIZES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
 def get_active_prizes():
     return [x for x in load_prizes() if x.get("active")]
+
 
 def load_used_codes():
     if not os.path.exists(USED_CODES_FILE):
@@ -83,9 +92,11 @@ def load_used_codes():
     with open(USED_CODES_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def save_used_codes(data):
     with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 def generate_code():
     used = load_used_codes()
@@ -95,15 +106,19 @@ def generate_code():
         if code not in existing:
             return code
 
+
 def weighted_pick(prizes):
     weights = [max(int(p.get("weight", 0)), 0) for p in prizes]
     return random.choices(prizes, weights=weights, k=1)[0]
 
+
 def parse_dt(dt_str):
     return datetime.fromisoformat(dt_str)
 
+
 def format_dt_msk(dt_obj):
     return dt_obj.astimezone(STORE_TIMEZONE).strftime("%d.%m.%Y %H:%M:%S МСК")
+
 
 def format_next_spin_time_moscow():
     now_msk = datetime.now(timezone.utc).astimezone(STORE_TIMEZONE)
@@ -117,11 +132,14 @@ def format_next_spin_time_moscow():
     )
     return next_spin.strftime("%d.%m.%Y %H:%M МСК")
 
+
 def is_staff(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
 
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
 
 def find_code_record(code: str, used: list):
     code = code.strip().upper()
@@ -130,12 +148,14 @@ def find_code_record(code: str, used: list):
             return item
     return None
 
+
 def find_last_spin_by_user_id(user_id: int, used: list):
     records = [x for x in used if x.get("user_id") == user_id and x.get("created_at")]
     if not records:
         return None
     records.sort(key=lambda x: x["created_at"], reverse=True)
     return records[0]
+
 
 def is_code_expired(record: dict):
     expires_at = record.get("expires_at")
@@ -145,14 +165,17 @@ def is_code_expired(record: dict):
     now_utc = datetime.now(timezone.utc)
     return now_utc > expires_dt
 
+
 def validate_init_data(init_data: str, bot_token: str):
     if not init_data or not bot_token:
         return None
 
     try:
+        decoded = unquote(init_data)
+
         chunks = [
             chunk.split("=", 1)
-            for chunk in unquote(init_data).split("&")
+            for chunk in decoded.split("&")
             if not chunk.startswith("hash=")
         ]
         chunks.sort(key=lambda x: x[0])
@@ -165,10 +188,16 @@ def validate_init_data(init_data: str, bot_token: str):
                 break
 
         if not hash_value:
+            for chunk in decoded.split("&"):
+                if chunk.startswith("hash="):
+                    hash_value = chunk.split("=", 1)[1]
+                    break
+
+        if not hash_value:
             return None
 
         data_map = {}
-        for chunk in unquote(init_data).split("&"):
+        for chunk in decoded.split("&"):
             if "=" in chunk:
                 k, v = chunk.split("=", 1)
                 data_map[k] = v
@@ -186,7 +215,7 @@ def validate_init_data(init_data: str, bot_token: str):
 
         secret_key = hmac.new(
             b"WebAppData",
-            bot_token.encode("utf-8"),
+            BOT_TOKEN.encode("utf-8"),
             hashlib.sha256
         ).digest()
 
@@ -212,6 +241,7 @@ def validate_init_data(init_data: str, bot_token: str):
     except Exception:
         return None
 
+
 def admin_menu():
     builder = InlineKeyboardBuilder()
     builder.button(text="Список призов", callback_data="admin:list")
@@ -221,6 +251,17 @@ def admin_menu():
     builder.button(text="Удалить приз", callback_data="admin:delete")
     builder.adjust(1)
     return builder.as_markup()
+
+
+def wheel_keyboard():
+    builder = InlineKeyboardBuilder()
+    if WEB_APP_URL:
+        builder.button(
+            text="🎡 Открыть колесо",
+            web_app=WebAppInfo(url=WEB_APP_URL)
+        )
+    return builder.as_markup()
+
 
 def format_prizes_text():
     prizes = load_prizes()
@@ -245,10 +286,12 @@ def format_prizes_text():
         )
     return "\n".join(lines)
 
+
 def get_next_prize_id(prizes):
     if not prizes:
         return 1
     return max(p.get("id", 0) for p in prizes) + 1
+
 
 def find_prize_by_id(prize_id: int):
     prizes = load_prizes()
@@ -257,9 +300,11 @@ def find_prize_by_id(prize_id: int):
             return prize
     return None
 
+
 @app.get("/")
 async def root():
     return {"ok": True, "service": "igadget-wheel-bot"}
+
 
 @app.get("/prizes")
 async def prizes_endpoint():
@@ -274,6 +319,7 @@ async def prizes_endpoint():
             "weight": prize.get("weight", 1)
         })
     return {"ok": True, "items": result}
+
 
 @app.post("/spin")
 async def spin(req: SpinRequest):
@@ -310,7 +356,9 @@ async def spin(req: SpinRequest):
                 "cooldown": True,
                 "next_spin_at_text": format_next_spin_time_moscow(),
                 "last_code": last_spin.get("code", ""),
-                "last_prize_title": last_spin.get("prize_title", "")
+                "last_prize_title": last_spin.get("prize_title", ""),
+                "last_prize_id": last_spin.get("prize_id"),
+                "last_prize_short": last_spin.get("prize_short", "")
             }
             if last_spin.get("expires_at"):
                 resp["expires_at"] = last_spin["expires_at"]
@@ -326,7 +374,9 @@ async def spin(req: SpinRequest):
         "username": username,
         "first_name": first_name,
         "code": code,
+        "prize_id": prize.get("id"),
         "prize_title": prize["title"],
+        "prize_short": prize.get("short", prize["title"]),
         "prize_description": prize["description"],
         "created_at": now_utc.isoformat(),
         "expires_at": expires_at.isoformat(),
@@ -363,12 +413,15 @@ async def spin(req: SpinRequest):
 
     return {
         "ok": True,
+        "prize_id": prize.get("id"),
         "prize_title": prize["title"],
+        "prize_short": prize.get("short", prize["title"]),
         "prize_description": prize["description"],
         "code": code,
         "expires_at": expires_at.isoformat(),
         "expires_at_text": format_dt_msk(expires_at)
     }
+
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
@@ -376,25 +429,30 @@ async def start_cmd(message: Message):
 
     if is_admin(user_id):
         await message.answer(
-            "Откройте Mini App через кнопку меню Telegram.\n\n"
+            "Откройте Mini App через кнопку ниже.\n\n"
             "Команды владельца:\n"
             "/admin — управление призами\n"
             "/check КОД — проверить код\n"
-            "/redeem КОД — погасить код"
+            "/redeem КОД — погасить код",
+            reply_markup=wheel_keyboard()
         )
         return
 
     if is_staff(user_id):
         await message.answer(
+            "Откройте Mini App через кнопку ниже.\n\n"
             "Служебные команды:\n"
             "/check КОД — проверить код\n"
-            "/redeem КОД — погасить код"
+            "/redeem КОД — погасить код",
+            reply_markup=wheel_keyboard()
         )
         return
 
     await message.answer(
-        "Откройте Mini App через кнопку меню Telegram и крутите колесо бонусов."
+        "Нажмите кнопку ниже и крутите колесо бонусов.",
+        reply_markup=wheel_keyboard()
     )
+
 
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message, state: FSMContext):
@@ -404,6 +462,7 @@ async def admin_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Панель управления призами:", reply_markup=admin_menu())
 
+
 @dp.callback_query(F.data == "admin:list")
 async def admin_list(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -411,6 +470,7 @@ async def admin_list(callback: CallbackQuery):
         return
     await callback.message.answer(format_prizes_text(), reply_markup=admin_menu())
     await callback.answer()
+
 
 @dp.callback_query(F.data == "admin:add")
 async def admin_add_start(callback: CallbackQuery, state: FSMContext):
@@ -422,11 +482,13 @@ async def admin_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите полное название нового приза:")
     await callback.answer()
 
+
 @dp.message(AddPrizeStates.title)
 async def admin_add_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text.strip())
     await state.set_state(AddPrizeStates.short)
     await message.answer("Введите короткую подпись для колеса, например: -10%, 500 ₽, 2x бонус")
+
 
 @dp.message(AddPrizeStates.short)
 async def admin_add_short(message: Message, state: FSMContext):
@@ -434,11 +496,13 @@ async def admin_add_short(message: Message, state: FSMContext):
     await state.set_state(AddPrizeStates.description)
     await message.answer("Введите описание приза:")
 
+
 @dp.message(AddPrizeStates.description)
 async def admin_add_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
     await state.set_state(AddPrizeStates.weight)
     await message.answer("Введите вес приза, например 25:")
+
 
 @dp.message(AddPrizeStates.weight)
 async def admin_add_weight(message: Message, state: FSMContext):
@@ -450,6 +514,7 @@ async def admin_add_weight(message: Message, state: FSMContext):
     await state.update_data(weight=int(text))
     await state.set_state(AddPrizeStates.active)
     await message.answer("Приз активен? Ответьте: да или нет")
+
 
 @dp.message(AddPrizeStates.active)
 async def admin_add_active(message: Message, state: FSMContext):
@@ -484,6 +549,7 @@ async def admin_add_active(message: Message, state: FSMContext):
         reply_markup=admin_menu()
     )
 
+
 @dp.callback_query(F.data == "admin:edit_weight")
 async def admin_edit_weight_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -494,6 +560,7 @@ async def admin_edit_weight_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(format_prizes_text())
     await callback.message.answer("Введите ID приза, у которого нужно изменить вес:")
     await callback.answer()
+
 
 @dp.message(EditWeightStates.prize_id)
 async def admin_edit_weight_id(message: Message, state: FSMContext):
@@ -511,6 +578,7 @@ async def admin_edit_weight_id(message: Message, state: FSMContext):
     await state.update_data(prize_id=prize_id)
     await state.set_state(EditWeightStates.weight)
     await message.answer(f"Введите новый вес для приза «{prize['title']}»:")
+
 
 @dp.message(EditWeightStates.weight)
 async def admin_edit_weight_value(message: Message, state: FSMContext):
@@ -542,6 +610,7 @@ async def admin_edit_weight_value(message: Message, state: FSMContext):
         reply_markup=admin_menu()
     )
 
+
 @dp.callback_query(F.data == "admin:toggle")
 async def admin_toggle_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -552,6 +621,7 @@ async def admin_toggle_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(format_prizes_text())
     await callback.message.answer("Введите ID приза, который нужно включить или выключить:")
     await callback.answer()
+
 
 @dp.message(TogglePrizeStates.prize_id)
 async def admin_toggle_finish(message: Message, state: FSMContext):
@@ -585,6 +655,7 @@ async def admin_toggle_finish(message: Message, state: FSMContext):
         reply_markup=admin_menu()
     )
 
+
 @dp.callback_query(F.data == "admin:delete")
 async def admin_delete_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -595,6 +666,7 @@ async def admin_delete_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(format_prizes_text())
     await callback.message.answer("Введите ID приза, который нужно удалить:")
     await callback.answer()
+
 
 @dp.message(DeletePrizeStates.prize_id)
 async def admin_delete_finish(message: Message, state: FSMContext):
@@ -627,6 +699,7 @@ async def admin_delete_finish(message: Message, state: FSMContext):
         f"Название: {target['title']}",
         reply_markup=admin_menu()
     )
+
 
 @dp.message(Command("check"))
 async def check_code_cmd(message: Message):
@@ -677,6 +750,7 @@ async def check_code_cmd(message: Message):
         )
 
     await message.answer(text)
+
 
 @dp.message(Command("redeem"))
 async def redeem_code_cmd(message: Message):
@@ -750,6 +824,7 @@ async def redeem_code_cmd(message: Message):
         except Exception:
             pass
 
+
 def main():
     async def runner():
         bot_task = asyncio.create_task(dp.start_polling(bot))
@@ -759,6 +834,7 @@ def main():
         await bot_task
 
     asyncio.run(runner())
+
 
 if __name__ == "__main__":
     main()
