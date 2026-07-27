@@ -2,7 +2,8 @@ import os
 import json
 import random
 import string
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -16,6 +17,8 @@ import asyncio
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+
+STORE_TIMEZONE = ZoneInfo("Europe/Moscow")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -31,7 +34,6 @@ app.add_middleware(
 
 USED_CODES_FILE = "used_codes.json"
 PRIZES_FILE = "prizes.json"
-SPIN_COOLDOWN_HOURS = 24
 
 def load_prizes():
     with open(PRIZES_FILE, "r", encoding="utf-8") as f:
@@ -75,6 +77,18 @@ def find_last_spin_by_user(user_id, used):
 def parse_dt(dt_str):
     return datetime.fromisoformat(dt_str)
 
+def format_next_spin_time_moscow():
+    now_msk = datetime.now(timezone.utc).astimezone(STORE_TIMEZONE)
+    tomorrow = now_msk.date().fromordinal(now_msk.date().toordinal() + 1)
+    next_spin = datetime(
+        tomorrow.year,
+        tomorrow.month,
+        tomorrow.day,
+        0, 0, 0,
+        tzinfo=STORE_TIMEZONE
+    )
+    return next_spin.strftime("%d.%m.%Y %H:%M МСК")
+
 class SpinRequest(BaseModel):
     user_id: int | None = None
     username: str = ""
@@ -111,23 +125,20 @@ async def spin(req: SpinRequest):
 
     used = load_used_codes()
     last_spin = find_last_spin_by_user(req.user_id, used)
-    now = datetime.now(timezone.utc)
+
+    now_utc = datetime.now(timezone.utc)
+    now_msk = now_utc.astimezone(STORE_TIMEZONE)
 
     if last_spin:
         last_spin_time = parse_dt(last_spin["created_at"])
-        next_allowed_time = last_spin_time + timedelta(hours=SPIN_COOLDOWN_HOURS)
+        last_spin_msk = last_spin_time.astimezone(STORE_TIMEZONE)
 
-        if now < next_allowed_time:
-            remaining = next_allowed_time - now
-            total_seconds = int(remaining.total_seconds())
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-
+        if last_spin_msk.date() == now_msk.date():
             return {
                 "ok": False,
-                "error": f"Вы уже крутили колесо. Следующая попытка через {hours} ч. {minutes} мин.",
+                "error": f"Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
                 "cooldown": True,
-                "next_spin_at": next_allowed_time.isoformat(),
+                "next_spin_at_text": format_next_spin_time_moscow(),
                 "last_code": last_spin.get("code", ""),
                 "last_prize_title": last_spin.get("prize_title", "")
             }
@@ -142,7 +153,7 @@ async def spin(req: SpinRequest):
         "first_name": req.first_name,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
-        "created_at": now.isoformat()
+        "created_at": now_utc.isoformat()
     }
 
     used.append(record)
@@ -159,7 +170,8 @@ async def spin(req: SpinRequest):
         f"Приз: {prize['title']}\n"
         f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
-        f"Время: {record['created_at']}"
+        f"Время UTC: {record['created_at']}\n"
+        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
     )
 
     for admin_id in ADMIN_IDS:
