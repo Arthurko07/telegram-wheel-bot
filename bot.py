@@ -95,7 +95,7 @@ def generate_code():
             return code
 
 def weighted_pick(prizes):
-    weights = [p["weight"] for p in prizes]
+    weights = [max(int(p.get("weight", 0)), 0) for p in prizes]
     return random.choices(prizes, weights=weights, k=1)[0]
 
 def parse_dt(dt_str):
@@ -259,6 +259,19 @@ def find_prize_by_id(prize_id: int):
 async def root():
     return {"ok": True, "service": "igadget-wheel-bot"}
 
+@app.get("/prizes")
+async def prizes_endpoint():
+    prizes = get_active_prizes()
+    result = []
+    for idx, prize in enumerate(prizes):
+        result.append({
+            "id": prize.get("id", idx + 1),
+            "title": prize.get("title", "Приз"),
+            "description": prize.get("description", ""),
+            "weight": prize.get("weight", 1)
+        })
+    return {"ok": True, "items": result}
+
 @app.post("/spin")
 async def spin(req: SpinRequest):
     auth = validate_init_data(req.init_data, BOT_TOKEN)
@@ -303,7 +316,7 @@ async def spin(req: SpinRequest):
 
     prize = weighted_pick(prizes)
     code = generate_code()
-    expires_at = now_utc + timedelta(days=3)
+    expires_at = now_utc + timedelta(days=7)
 
     record = {
         "user_id": user_id,
@@ -355,13 +368,28 @@ async def spin(req: SpinRequest):
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
+    user_id = message.from_user.id
+
+    if is_admin(user_id):
+        await message.answer(
+            "Откройте Mini App через кнопку меню Telegram.\n\n"
+            "Команды владельца:\n"
+            "/admin — управление призами\n"
+            "/check КОД — проверить код\n"
+            "/redeem КОД — погасить код"
+        )
+        return
+
+    if is_staff(user_id):
+        await message.answer(
+            "Служебные команды:\n"
+            "/check КОД — проверить код\n"
+            "/redeem КОД — погасить код"
+        )
+        return
+
     await message.answer(
-        "Откройте Mini App через кнопку меню Telegram.\n\n"
-        "Для сотрудников:\n"
-        "/check КОД — проверить код\n"
-        "/redeem КОД — погасить код\n\n"
-        "Для владельца:\n"
-        "/admin — управление призами"
+        "Откройте Mini App через кнопку меню Telegram и крутите колесо бонусов."
     )
 
 @dp.message(Command("admin"))
