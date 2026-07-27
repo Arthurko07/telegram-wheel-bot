@@ -6,7 +6,7 @@ import random
 import string
 import asyncio
 from datetime import datetime, timezone
-from urllib.parse import parse_qsl
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
@@ -104,65 +104,67 @@ def validate_init_data(init_data: str, bot_token: str):
         return None
 
     try:
-        pairs = parse_qsl(init_data, keep_blank_values=True)
+        chunks = [
+            chunk.split("=", 1)
+            for chunk in unquote(init_data).split("&")
+            if not chunk.startswith("hash=")
+        ]
+        chunks.sort(key=lambda x: x[0])
+        data_check_string = "\n".join(f"{k}={v}" for k, v in chunks)
+
+        hash_value = None
+        for chunk in init_data.split("&"):
+            if chunk.startswith("hash="):
+                hash_value = chunk.split("=", 1)[1]
+                break
+
+        if not hash_value:
+            return None
+
+        data_map = {}
+        for chunk in unquote(init_data).split("&"):
+            if "=" in chunk:
+                k, v = chunk.split("=", 1)
+                data_map[k] = v
+
+        auth_date = data_map.get("auth_date")
+        user_raw = data_map.get("user")
+
+        if not auth_date or not user_raw:
+            return None
+
+        auth_date_int = int(auth_date)
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if now_ts - auth_date_int > INIT_DATA_TTL:
+            return None
+
+        secret_key = hmac.new(
+            b"WebAppData",
+            bot_token.encode("utf-8"),
+            hashlib.sha256
+        ).digest()
+
+        calculated_hash = hmac.new(
+            secret_key,
+            data_check_string.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(calculated_hash, hash_value):
+            return None
+
+        user = json.loads(user_raw)
+        if "id" not in user:
+            return None
+
+        return {
+            "user_id": int(user["id"]),
+            "username": user.get("username", ""),
+            "first_name": user.get("first_name", "")
+        }
+
     except Exception:
         return None
-
-    data = dict(pairs)
-    received_hash = data.get("hash")
-    auth_date = data.get("auth_date")
-    user_raw = data.get("user")
-
-    if not received_hash or not auth_date or not user_raw:
-        return None
-
-    try:
-        auth_date_int = int(auth_date)
-    except ValueError:
-        return None
-
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    if now_ts - auth_date_int > INIT_DATA_TTL:
-        return None
-
-    check_pairs = []
-    for key, value in pairs:
-        if key == "hash":
-            continue
-        check_pairs.append(f"{key}={value}")
-
-    check_pairs.sort()
-    data_check_string = "\n".join(check_pairs)
-
-    secret_key = hmac.new(
-        key=b"WebAppData",
-        msg=bot_token.encode("utf-8"),
-        digestmod=hashlib.sha256
-    ).digest()
-
-    calculated_hash = hmac.new(
-        key=secret_key,
-        msg=data_check_string.encode("utf-8"),
-        digestmod=hashlib.sha256
-    ).hexdigest()
-
-    if not hmac.compare_digest(calculated_hash, received_hash):
-        return None
-
-    try:
-        user = json.loads(user_raw)
-    except json.JSONDecodeError:
-        return None
-
-    user_id = user.get("id")
-    if user_id is None:
-        return None
-
-    return {
-        "user_id": int(user_id),
-        "username": user.get("username", ""),
-        "first_name": user.get("first_name", "")
-    }
 
 class SpinRequest(BaseModel):
     init_data: str = ""
