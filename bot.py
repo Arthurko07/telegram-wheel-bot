@@ -9,9 +9,14 @@ from datetime import datetime, timezone
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -26,7 +31,7 @@ STORE_TIMEZONE = ZoneInfo("Europe/Moscow")
 INIT_DATA_TTL = 60 * 60 * 24
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
 
 app.add_middleware(
@@ -40,10 +45,37 @@ app.add_middleware(
 USED_CODES_FILE = "used_codes.json"
 PRIZES_FILE = "prizes.json"
 
+class SpinRequest(BaseModel):
+    init_data: str = ""
+
+class AddPrizeStates(StatesGroup):
+    title = State()
+    description = State()
+    weight = State()
+    active = State()
+
+class EditWeightStates(StatesGroup):
+    prize_id = State()
+    weight = State()
+
+class DeletePrizeStates(StatesGroup):
+    prize_id = State()
+
+class TogglePrizeStates(StatesGroup):
+    prize_id = State()
+
 def load_prizes():
+    if not os.path.exists(PRIZES_FILE):
+        return []
     with open(PRIZES_FILE, "r", encoding="utf-8") as f:
-        items = json.load(f)
-    return [x for x in items if x.get("active")]
+        return json.load(f)
+
+def save_prizes(data):
+    with open(PRIZES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_active_prizes():
+    return [x for x in load_prizes() if x.get("active")]
 
 def load_used_codes():
     if not os.path.exists(USED_CODES_FILE):
@@ -84,6 +116,9 @@ def format_next_spin_time_moscow():
 
 def is_staff(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 def find_code_record(code: str, used: list):
     code = code.strip().upper()
@@ -166,8 +201,138 @@ def validate_init_data(init_data: str, bot_token: str):
     except Exception:
         return None
 
-class SpinRequest(BaseModel):
-    init_data: str = ""
+def admin_menu():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Список призов", callback_data="admin:list")
+    builder.button(text="Добавить приз", callback_data="admin:add")
+    builder.button(text="Изменить вес", callback_data="admin:edit_weight")
+    builder.button(text="Вкл/выкл приз", callback_data="admin:toggle")
+    builder.button(text="Удалить приз", callback_data="admin:delete")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def format_prizes_text():
+    prizes = load_prizes()
+    if not prizes:
+        return "Список призов пуст."
+
+    lines = ["Список призов:\n"]
+    total_weight = sum(p.get("weight", 0) for p in prizes if p.get("active"))
+    for p in prizes:
+        active_text = "включен" if p.get("active") else "выключен"
+        percent_text = ""
+        if p.get("active") and total_weight > 0:
+            chance = round((p.get("weight", 0) / total_weight) * 100, 2)
+            percent_text = f" (~{chance}%)"
+        lines.append(
+            f"ID: {p.get('id')}\n"
+            f"Название: {p.get('title')}\n"
+            f"Описание: {p.get('description')}\n"
+            f"Вес: {p.get('weight')}{percent_text}\n"
+            f"Статус: {active_text}\n"
+        )
+    return "\n".join(lines)
+
+def get_next_prize_id(prizes):
+    if not prizes:
+        return 1
+    return max(p.get("id", 0) for p in prizes) + 1
+
+def find_prize_by_id(prize_id: int):
+    prizes = load_prizes()
+    for prize in prizes:
+        if prize.get("id") == prize_id:
+            return prize
+    return None
+
+@app.get("/")
+async def root():
+    return {"ok": True, "service": "igadget-wheel-bot"}
+
+@app.post("/spin")
+async def spin(req: SpinRequest):
+    auth = validate_init_data(req.init_data, BOT_TOKEN)
+
+    if not auth:
+        return {
+            "ok": False,
+            "error": "Не удалось проверить Telegram-пользователя"
+        }
+
+    user_id = auth["user_id"]
+    username = auth["username"]
+    first_name = auth["first_name"]
+
+    prizes = get_active_prizes()
+    if not prizes:
+        return {"ok": False, "error": "Нет активных призов"}
+
+    used = load_used_codes()
+    last_spin = find_last_spin_by_user_id(user_id, used)
+
+    now_utc = datetime.now(timezone.utc)
+    now_msk = now_utc.astimezone(STORE_TIMEZONE)
+
+    if last_spin:
+        last_spin_time = parse_dt(last_spin["created_at"])
+        last_spin_msk = last_spin_time.astimezone(STORE_TIMEZONE)
+
+        if last_spin_msk.date() == now_msk.date():
+            return {
+                "ok": False,
+                "error": "Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
+                "cooldown": True,
+                "next_spin_at_text": format_next_spin_time_moscow(),
+                "last_code": last_spin.get("code", ""),
+                "last_prize_title": last_spin.get("prize_title", "")
+            }
+
+    prize = weighted_pick(prizes)
+    code = generate_code()
+
+    record = {
+        "user_id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "code": code,
+        "prize_title": prize["title"],
+        "prize_description": prize["description"],
+        "created_at": now_utc.isoformat(),
+        "redeemed": False,
+        "redeemed_at": None,
+        "redeemed_by": None
+    }
+
+    used.append(record)
+    save_used_codes(used)
+
+    username_part = f"@{username}" if username else "без username"
+    first_name_part = first_name if first_name else "Без имени"
+
+    text = (
+        f"🎁 Новый выигрыш\n"
+        f"Имя: {first_name_part}\n"
+        f"Username: {username_part}\n"
+        f"User ID: {user_id}\n"
+        f"Приз: {prize['title']}\n"
+        f"Описание: {prize['description']}\n"
+        f"Код: {code}\n"
+        f"Время UTC: {record['created_at']}\n"
+        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "prize_title": prize["title"],
+        "prize_description": prize["description"],
+        "code": code
+    }
 
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
@@ -175,7 +340,233 @@ async def start_cmd(message: Message):
         "Откройте Mini App через кнопку меню Telegram.\n\n"
         "Для сотрудников:\n"
         "/check КОД — проверить код\n"
-        "/redeem КОД — погасить код"
+        "/redeem КОД — погасить код\n\n"
+        "Для владельца:\n"
+        "/admin — управление призами"
+    )
+
+@dp.message(Command("admin"))
+async def admin_cmd(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет доступа к админ-панели.")
+        return
+    await state.clear()
+    await message.answer("Панель управления призами:", reply_markup=admin_menu())
+
+@dp.callback_query(F.data == "admin:list")
+async def admin_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer(format_prizes_text(), reply_markup=admin_menu())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin:add")
+async def admin_add_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AddPrizeStates.title)
+    await callback.message.answer("Введите название нового приза:")
+    await callback.answer()
+
+@dp.message(AddPrizeStates.title)
+async def admin_add_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(AddPrizeStates.description)
+    await message.answer("Введите описание приза:")
+
+@dp.message(AddPrizeStates.description)
+async def admin_add_description(message: Message, state: FSMContext):
+    await state.update_data(description=message.text.strip())
+    await state.set_state(AddPrizeStates.weight)
+    await message.answer("Введите вес приза, например 25:")
+
+@dp.message(AddPrizeStates.weight)
+async def admin_add_weight(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("Вес должен быть целым числом. Введите ещё раз:")
+        return
+
+    await state.update_data(weight=int(text))
+    await state.set_state(AddPrizeStates.active)
+    await message.answer("Приз активен? Ответьте: да или нет")
+
+@dp.message(AddPrizeStates.active)
+async def admin_add_active(message: Message, state: FSMContext):
+    text = message.text.strip().lower()
+    if text not in ["да", "нет"]:
+        await message.answer("Введите только: да или нет")
+        return
+
+    data = await state.get_data()
+    prizes = load_prizes()
+
+    new_prize = {
+        "id": get_next_prize_id(prizes),
+        "title": data["title"],
+        "description": data["description"],
+        "weight": data["weight"],
+        "active": text == "да"
+    }
+
+    prizes.append(new_prize)
+    save_prizes(prizes)
+    await state.clear()
+
+    await message.answer(
+        f"Приз добавлен:\n"
+        f"ID: {new_prize['id']}\n"
+        f"Название: {new_prize['title']}\n"
+        f"Вес: {new_prize['weight']}\n"
+        f"Активен: {'да' if new_prize['active'] else 'нет'}",
+        reply_markup=admin_menu()
+    )
+
+@dp.callback_query(F.data == "admin:edit_weight")
+async def admin_edit_weight_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(EditWeightStates.prize_id)
+    await callback.message.answer(format_prizes_text())
+    await callback.message.answer("Введите ID приза, у которого нужно изменить вес:")
+    await callback.answer()
+
+@dp.message(EditWeightStates.prize_id)
+async def admin_edit_weight_id(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("ID должен быть числом. Введите ещё раз:")
+        return
+
+    prize_id = int(text)
+    prize = find_prize_by_id(prize_id)
+    if not prize:
+        await message.answer("Приз с таким ID не найден. Введите ещё раз:")
+        return
+
+    await state.update_data(prize_id=prize_id)
+    await state.set_state(EditWeightStates.weight)
+    await message.answer(f"Введите новый вес для приза «{prize['title']}»:")
+
+@dp.message(EditWeightStates.weight)
+async def admin_edit_weight_value(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("Вес должен быть числом. Введите ещё раз:")
+        return
+
+    data = await state.get_data()
+    prize_id = data["prize_id"]
+    new_weight = int(text)
+
+    prizes = load_prizes()
+    updated = None
+    for prize in prizes:
+        if prize.get("id") == prize_id:
+            prize["weight"] = new_weight
+            updated = prize
+            break
+
+    save_prizes(prizes)
+    await state.clear()
+
+    await message.answer(
+        f"Вес обновлён.\n"
+        f"ID: {updated['id']}\n"
+        f"Название: {updated['title']}\n"
+        f"Новый вес: {updated['weight']}",
+        reply_markup=admin_menu()
+    )
+
+@dp.callback_query(F.data == "admin:toggle")
+async def admin_toggle_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(TogglePrizeStates.prize_id)
+    await callback.message.answer(format_prizes_text())
+    await callback.message.answer("Введите ID приза, который нужно включить или выключить:")
+    await callback.answer()
+
+@dp.message(TogglePrizeStates.prize_id)
+async def admin_toggle_finish(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("ID должен быть числом. Введите ещё раз:")
+        return
+
+    prize_id = int(text)
+    prizes = load_prizes()
+    updated = None
+
+    for prize in prizes:
+        if prize.get("id") == prize_id:
+            prize["active"] = not prize.get("active", False)
+            updated = prize
+            break
+
+    if not updated:
+        await message.answer("Приз с таким ID не найден.")
+        return
+
+    save_prizes(prizes)
+    await state.clear()
+
+    await message.answer(
+        f"Статус приза изменён.\n"
+        f"ID: {updated['id']}\n"
+        f"Название: {updated['title']}\n"
+        f"Теперь: {'включен' if updated['active'] else 'выключен'}",
+        reply_markup=admin_menu()
+    )
+
+@dp.callback_query(F.data == "admin:delete")
+async def admin_delete_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(DeletePrizeStates.prize_id)
+    await callback.message.answer(format_prizes_text())
+    await callback.message.answer("Введите ID приза, который нужно удалить:")
+    await callback.answer()
+
+@dp.message(DeletePrizeStates.prize_id)
+async def admin_delete_finish(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("ID должен быть числом. Введите ещё раз:")
+        return
+
+    prize_id = int(text)
+    prizes = load_prizes()
+
+    target = None
+    new_prizes = []
+    for prize in prizes:
+        if prize.get("id") == prize_id:
+            target = prize
+        else:
+            new_prizes.append(prize)
+
+    if not target:
+        await message.answer("Приз с таким ID не найден.")
+        return
+
+    save_prizes(new_prizes)
+    await state.clear()
+
+    await message.answer(
+        f"Приз удалён.\n"
+        f"ID: {target['id']}\n"
+        f"Название: {target['title']}",
+        reply_markup=admin_menu()
     )
 
 @dp.message(Command("check"))
@@ -281,109 +672,15 @@ async def redeem_code_cmd(message: Message):
         except Exception:
             pass
 
-@app.get("/")
-async def root():
-    return {"ok": True, "service": "igadget-wheel-bot"}
-
-@app.post("/spin")
-async def spin(req: SpinRequest):
-    auth = validate_init_data(req.init_data, BOT_TOKEN)
-
-    if not auth:
-        return {
-            "ok": False,
-            "error": "Не удалось проверить Telegram-пользователя"
-        }
-
-    user_id = auth["user_id"]
-    username = auth["username"]
-    first_name = auth["first_name"]
-
-    prizes = load_prizes()
-    if not prizes:
-        return {"ok": False, "error": "Нет активных призов"}
-
-    used = load_used_codes()
-    last_spin = find_last_spin_by_user_id(user_id, used)
-
-    now_utc = datetime.now(timezone.utc)
-    now_msk = now_utc.astimezone(STORE_TIMEZONE)
-
-    if last_spin:
-        last_spin_time = parse_dt(last_spin["created_at"])
-        last_spin_msk = last_spin_time.astimezone(STORE_TIMEZONE)
-
-        if last_spin_msk.date() == now_msk.date():
-            return {
-                "ok": False,
-                "error": "Вы уже крутили колесо сегодня. Следующая попытка будет доступна после 00:00 МСК.",
-                "cooldown": True,
-                "next_spin_at_text": format_next_spin_time_moscow(),
-                "last_code": last_spin.get("code", ""),
-                "last_prize_title": last_spin.get("prize_title", "")
-            }
-
-    prize = weighted_pick(prizes)
-    code = generate_code()
-
-    record = {
-        "user_id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "code": code,
-        "prize_title": prize["title"],
-        "prize_description": prize["description"],
-        "created_at": now_utc.isoformat(),
-        "redeemed": False,
-        "redeemed_at": None,
-        "redeemed_by": None
-    }
-
-    used.append(record)
-    save_used_codes(used)
-
-    username_part = f"@{username}" if username else "без username"
-    first_name_part = first_name if first_name else "Без имени"
-
-    text = (
-        f"🎁 Новый выигрыш\n"
-        f"Имя: {first_name_part}\n"
-        f"Username: {username_part}\n"
-        f"User ID: {user_id}\n"
-        f"Приз: {prize['title']}\n"
-        f"Описание: {prize['description']}\n"
-        f"Код: {code}\n"
-        f"Время UTC: {record['created_at']}\n"
-        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, text)
-        except Exception:
-            pass
-
-    return {
-        "ok": True,
-        "prize_title": prize["title"],
-        "prize_description": prize["description"],
-        "code": code
-    }
-
-async def run_bot():
-    await dp.start_polling(bot)
-
 def main():
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
+    async def runner():
+        bot_task = asyncio.create_task(dp.start_polling(bot))
+        config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+        server = uvicorn.Server(config)
+        await server.serve()
+        await bot_task
 
-    config = uvicorn.Config(
-        app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000"))
-    )
-    server = uvicorn.Server(config)
-    loop.run_until_complete(server.serve())
+    asyncio.run(runner())
 
 if __name__ == "__main__":
     main()
