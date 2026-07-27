@@ -49,6 +49,7 @@ class SpinRequest(BaseModel):
 
 class AddPrizeStates(StatesGroup):
     title = State()
+    short = State()
     description = State()
     weight = State()
     active = State()
@@ -237,6 +238,7 @@ def format_prizes_text():
         lines.append(
             f"ID: {p.get('id')}\n"
             f"Название: {p.get('title')}\n"
+            f"Коротко: {p.get('short', '—')}\n"
             f"Описание: {p.get('description')}\n"
             f"Вес: {p.get('weight')}{percent_text}\n"
             f"Статус: {active_text}\n"
@@ -267,6 +269,7 @@ async def prizes_endpoint():
         result.append({
             "id": prize.get("id", idx + 1),
             "title": prize.get("title", "Приз"),
+            "short": prize.get("short") or prize.get("title", "Приз"),
             "description": prize.get("description", ""),
             "weight": prize.get("weight", 1)
         })
@@ -344,6 +347,7 @@ async def spin(req: SpinRequest):
         f"Username: {username_part}\n"
         f"User ID: {user_id}\n"
         f"Приз: {prize['title']}\n"
+        f"Коротко на колесе: {prize.get('short', '—')}\n"
         f"Описание: {prize['description']}\n"
         f"Код: {code}\n"
         f"Действителен до: {format_dt_msk(expires_at)}\n"
@@ -415,12 +419,18 @@ async def admin_add_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(AddPrizeStates.title)
-    await callback.message.answer("Введите название нового приза:")
+    await callback.message.answer("Введите полное название нового приза:")
     await callback.answer()
 
 @dp.message(AddPrizeStates.title)
 async def admin_add_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text.strip())
+    await state.set_state(AddPrizeStates.short)
+    await message.answer("Введите короткую подпись для колеса, например: -10%, 500 ₽, 2x бонус")
+
+@dp.message(AddPrizeStates.short)
+async def admin_add_short(message: Message, state: FSMContext):
+    await state.update_data(short=message.text.strip())
     await state.set_state(AddPrizeStates.description)
     await message.answer("Введите описание приза:")
 
@@ -454,6 +464,7 @@ async def admin_add_active(message: Message, state: FSMContext):
     new_prize = {
         "id": get_next_prize_id(prizes),
         "title": data["title"],
+        "short": data["short"],
         "description": data["description"],
         "weight": data["weight"],
         "active": text == "да"
@@ -467,6 +478,7 @@ async def admin_add_active(message: Message, state: FSMContext):
         f"Приз добавлен:\n"
         f"ID: {new_prize['id']}\n"
         f"Название: {new_prize['title']}\n"
+        f"Коротко: {new_prize['short']}\n"
         f"Вес: {new_prize['weight']}\n"
         f"Активен: {'да' if new_prize['active'] else 'нет'}",
         reply_markup=admin_menu()
