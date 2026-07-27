@@ -17,6 +17,7 @@ import asyncio
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+TRUSTED_IDS = [int(x) for x in os.getenv("TRUSTED_IDS", "").split(",") if x.strip()]
 
 STORE_TIMEZONE = ZoneInfo("Europe/Moscow")
 
@@ -69,13 +70,10 @@ def parse_dt(dt_str):
 def get_identity_key(req):
     if req.user_id is not None:
         return f"user_id:{req.user_id}"
-
     if req.username:
         return f"username:{req.username.lower()}"
-
     if req.session_id:
         return f"session:{req.session_id}"
-
     return None
 
 def find_last_spin_by_identity(identity_key, used):
@@ -101,6 +99,16 @@ def format_next_spin_time_moscow():
     )
     return next_spin.strftime("%d.%m.%Y %H:%M МСК")
 
+def is_staff(user_id: int) -> bool:
+    return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
+
+def find_code_record(code: str, used: list):
+    code = code.strip().upper()
+    for item in used:
+        if item.get("code", "").upper() == code:
+            return item
+    return None
+
 class SpinRequest(BaseModel):
     user_id: int | None = None
     username: str = ""
@@ -116,9 +124,121 @@ async def start_cmd(message: Message):
         resize_keyboard=True
     )
     await message.answer(
-        "Нажмите кнопку ниже, чтобы открыть колесо бонусов.",
+        "Нажмите кнопку ниже, чтобы открыть колесо бонусов.\n\n"
+        "Для сотрудников:\n"
+        "/check КОД — проверить код\n"
+        "/redeem КОД — погасить код",
         reply_markup=kb
     )
+
+@dp.message(Command("check"))
+async def check_code_cmd(message: Message):
+    if not is_staff(message.from_user.id):
+        await message.answer("У вас нет доступа к этой команде.")
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /check IG-XXXXXX")
+        return
+
+    code = parts[1].strip().upper()
+    used = load_used_codes()
+    record = find_code_record(code, used)
+
+    if not record:
+        await message.answer("Код не найден.")
+        return
+
+    redeemed = record.get("redeemed", False)
+    redeemed_text = "Да" if redeemed else "Нет"
+
+    text = (
+        f"Проверка кода\n"
+        f"Код: {record.get('code', '—')}\n"
+        f"Приз: {record.get('prize_title', '—')}\n"
+        f"Имя: {record.get('first_name') or 'Без имени'}\n"
+        f"Username: @{record.get('username')}" if record.get('username') else
+        f"Проверка кода\nКод: {record.get('code', '—')}\nПриз: {record.get('prize_title', '—')}\nИмя: {record.get('first_name') or 'Без имени'}\nUsername: без username"
+    )
+
+    extra = (
+        f"\nИспользован: {redeemed_text}\n"
+        f"Выдан: {record.get('created_at', '—')}"
+    )
+
+    if redeemed:
+        extra += (
+            f"\nПогашен: {record.get('redeemed_at', '—')}\n"
+            f"Кем: {record.get('redeemed_by', '—')}"
+        )
+
+    await message.answer(text + extra)
+
+@dp.message(Command("redeem"))
+async def redeem_code_cmd(message: Message):
+    if not is_staff(message.from_user.id):
+        await message.answer("У вас нет доступа к этой команде.")
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /redeem IG-XXXXXX")
+        return
+
+    code = parts[1].strip().upper()
+    used = load_used_codes()
+    record = find_code_record(code, used)
+
+    if not record:
+        await message.answer("Код не найден.")
+        return
+
+    if record.get("redeemed", False):
+        await message.answer(
+            f"Этот код уже использован.\n"
+            f"Код: {record.get('code', '—')}\n"
+            f"Погашен: {record.get('redeemed_at', '—')}\n"
+            f"Кем: {record.get('redeemed_by', '—')}"
+        )
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    now_msk = now_utc.astimezone(STORE_TIMEZONE)
+    staff_name = message.from_user.full_name or "Сотрудник"
+    staff_username = f"@{message.from_user.username}" if message.from_user.username else "без username"
+
+    record["redeemed"] = True
+    record["redeemed_at"] = now_utc.isoformat()
+    record["redeemed_by"] = f"{staff_name} ({staff_username}, id={message.from_user.id})"
+
+    save_used_codes(used)
+
+    await message.answer(
+        f"Код погашен.\n"
+        f"Код: {record.get('code', '—')}\n"
+        f"Приз: {record.get('prize_title', '—')}"
+    )
+
+    notify_text = (
+        f"✅ Код погашен\n"
+        f"Код: {record.get('code', '—')}\n"
+        f"Приз: {record.get('prize_title', '—')}\n"
+        f"Клиент: {record.get('first_name') or 'Без имени'}\n"
+        f"Username клиента: @{record.get('username')}" if record.get('username') else
+        f"✅ Код погашен\nКод: {record.get('code', '—')}\nПриз: {record.get('prize_title', '—')}\nКлиент: {record.get('first_name') or 'Без имени'}\nUsername клиента: без username"
+    )
+
+    notify_tail = (
+        f"\nПогасил: {staff_name} ({staff_username})\n"
+        f"Время МСК: {now_msk.strftime('%d.%m.%Y %H:%M:%S')}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, notify_text + notify_tail)
+        except Exception:
+            pass
 
 @app.get("/")
 async def root():
@@ -170,7 +290,10 @@ async def spin(req: SpinRequest):
         "session_id": req.session_id,
         "prize_title": prize["title"],
         "prize_description": prize["description"],
-        "created_at": now_utc.isoformat()
+        "created_at": now_utc.isoformat(),
+        "redeemed": False,
+        "redeemed_at": None,
+        "redeemed_by": None
     }
 
     used.append(record)
