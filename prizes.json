@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "title": "5% скидка",
+    "description": "Скидка на любую покупку в iGadget",
+    "weight": 18,
+    "active": true
+  },
+  {
+    "id": 2,
+    "title": "10% скидка",
+    "description": "Повышенная скидка на один заказ",
+    "weight": 12,
+    "active": true
+  },
+  {
+    "id": 3,
+    "title": "Бесплатная доставка",
+    "description": "Доставка за наш счёт",
+    "weight": 16,
+    "active": true
+  },
+  {
+    "id": 4,
+    "title": "Подарок к заказу",
+    "description": "Небольшой аксессуар в подарок",
+    "weight": 14,
+    "active": true
+  }
+]
