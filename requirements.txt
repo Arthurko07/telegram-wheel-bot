@@ -1,2 +1,1 @@
 aiogram==3.20.0.post0
-aiohttp==3.12.13
