@@ -29,6 +29,61 @@ TRUSTED_IDS = [int(x) for x in os.getenv("TRUSTED_IDS", "").split(",") if x.stri
 STORE_TIMEZONE = ZoneInfo("Europe/Moscow")
 INIT_DATA_TTL = 60 * 60 * 24
 
+DATA_DIR = "/app/data"
+PRIZES_FILE = os.path.join(DATA_DIR, "prizes.json")
+USED_CODES_FILE = os.path.join(DATA_DIR, "used_codes.json")
+
+DEFAULT_PRIZES = [
+    {
+        "id": 1,
+        "title": "Двойное начисление бонусов",
+        "short": "2x бонус",
+        "description": "Получите двойное начисление бонусов на покупку",
+        "weight": 20,
+        "active": True
+    },
+    {
+        "id": 2,
+        "title": "Скидка на зарядку 10%",
+        "short": "Зарядка -10%",
+        "description": "Скидка 10% на зарядные устройства",
+        "weight": 16,
+        "active": True
+    },
+    {
+        "id": 3,
+        "title": "Скидка на Power Bank 15%",
+        "short": "PB -15%",
+        "description": "Скидка 15% на Power Bank",
+        "weight": 14,
+        "active": True
+    },
+    {
+        "id": 4,
+        "title": "Скидка 500 ₽ на аксессуары",
+        "short": "500 ₽",
+        "description": "Скидка 500 рублей на аксессуары",
+        "weight": 12,
+        "active": True
+    },
+    {
+        "id": 5,
+        "title": "Подарок к покупке",
+        "short": "Подарок",
+        "description": "Подарок к покупке в магазине iGadget",
+        "weight": 10,
+        "active": True
+    },
+    {
+        "id": 6,
+        "title": "Бесплатная доставка",
+        "short": "Доставка",
+        "description": "Бесплатная доставка заказа",
+        "weight": 8,
+        "active": True
+    }
+]
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
@@ -40,9 +95,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-USED_CODES_FILE = "used_codes.json"
-PRIZES_FILE = "prizes.json"
 
 
 class SpinRequest(BaseModel):
@@ -70,14 +122,26 @@ class TogglePrizeStates(StatesGroup):
     prize_id = State()
 
 
-def load_prizes():
+def ensure_data_files():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
     if not os.path.exists(PRIZES_FILE):
-        return []
+        with open(PRIZES_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_PRIZES, f, ensure_ascii=False, indent=2)
+
+    if not os.path.exists(USED_CODES_FILE):
+        with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+
+
+def load_prizes():
+    ensure_data_files()
     with open(PRIZES_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_prizes(data):
+    ensure_data_files()
     with open(PRIZES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -87,13 +151,13 @@ def get_active_prizes():
 
 
 def load_used_codes():
-    if not os.path.exists(USED_CODES_FILE):
-        return []
+    ensure_data_files()
     with open(USED_CODES_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_used_codes(data):
+    ensure_data_files()
     with open(USED_CODES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -303,7 +367,14 @@ def find_prize_by_id(prize_id: int):
 
 @app.get("/")
 async def root():
-    return {"ok": True, "service": "igadget-wheel-bot"}
+    return {
+        "ok": True,
+        "service": "igadget-wheel-bot",
+        "data_dir": DATA_DIR,
+        "prizes_file": PRIZES_FILE,
+        "used_codes_file": USED_CODES_FILE,
+        "volume_mount_path": os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
+    }
 
 
 @app.get("/prizes")
@@ -826,6 +897,8 @@ async def redeem_code_cmd(message: Message):
 
 
 def main():
+    ensure_data_files()
+
     async def runner():
         bot_task = asyncio.create_task(dp.start_polling(bot))
         config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
