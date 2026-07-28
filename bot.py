@@ -58,6 +58,16 @@ def write_json_file(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def normalize_weight(value, default=1.0):
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if weight <= 0:
+        return float(default)
+    return round(weight, 3)
+
+
 def ensure_files():
     if not os.path.exists(PRIZES_FILE):
         write_json_file(PRIZES_FILE, [
@@ -168,11 +178,52 @@ def get_user_from_init_data(init_data: str):
 
 
 def load_prizes():
-    return read_json_file(PRIZES_FILE, [])
+    items = read_json_file(PRIZES_FILE, [])
+    if not isinstance(items, list):
+        return []
+    normalized = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "id": int(item.get("id", index)),
+            "title": str(item.get("title", "")).strip(),
+            "short": str(item.get("short", "")).strip(),
+            "description": str(item.get("description", "")).strip(),
+            "weight": normalize_weight(item.get("weight", 1)),
+            "active": bool(item.get("active", True)),
+        })
+    return normalized
+
+
+def enrich_prizes_with_probability(items):
+    prizes = [dict(item) for item in (items or []) if isinstance(item, dict)]
+    active_items = [x for x in prizes if x.get("active", True)]
+    total_weight = sum(normalize_weight(x.get("weight", 1)) for x in active_items)
+
+    for item in prizes:
+        item["weight"] = normalize_weight(item.get("weight", 1))
+        if item.get("active", True) and total_weight > 0:
+            item["drop_percent"] = round((item["weight"] / total_weight) * 100, 2)
+        else:
+            item["drop_percent"] = 0.0
+    return prizes
 
 
 def save_prizes(items):
-    write_json_file(PRIZES_FILE, items)
+    normalized = []
+    for index, item in enumerate(items or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "id": int(item.get("id", index)),
+            "title": str(item.get("title", "")).strip(),
+            "short": str(item.get("short", "")).strip(),
+            "description": str(item.get("description", "")).strip(),
+            "weight": normalize_weight(item.get("weight", 1)),
+            "active": bool(item.get("active", True)),
+        })
+    write_json_file(PRIZES_FILE, normalized)
 
 
 def load_used_codes():
@@ -222,12 +273,19 @@ def choose_weighted_prize(prizes):
     if not active_prizes:
         return None
 
-    weighted = []
-    for prize in active_prizes:
-        weight = int(prize.get("weight", 1) or 1)
-        weighted.extend([prize] * max(1, weight))
+    total_weight = sum(normalize_weight(p.get("weight", 1)) for p in active_prizes)
+    if total_weight <= 0:
+        return None
 
-    return random.choice(weighted)
+    threshold = random.uniform(0, total_weight)
+    cumulative = 0.0
+
+    for prize in active_prizes:
+        cumulative += normalize_weight(prize.get("weight", 1))
+        if threshold <= cumulative:
+            return prize
+
+    return active_prizes[-1]
 
 
 def today_key_msk():
@@ -344,7 +402,18 @@ def health():
 def prizes():
     items = load_prizes()
     active = [x for x in items if x.get("active", True)]
-    return {"ok": True, "items": active}
+    public_items = []
+
+    for item in active:
+        public_items.append({
+            "id": item.get("id"),
+            "title": item.get("title"),
+            "short": item.get("short"),
+            "description": item.get("description", ""),
+            "active": bool(item.get("active", True)),
+        })
+
+    return {"ok": True, "items": public_items}
 
 
 @app.post("/spin")
@@ -393,6 +462,8 @@ async def spin(request: Request):
         "prize_id": prize.get("id"),
         "prize_title": prize.get("title"),
         "prize_description": prize.get("description", ""),
+        "prize_weight": normalize_weight(prize.get("weight", 1)),
+        "prize_drop_percent": next((x.get("drop_percent", 0.0) for x in enrich_prizes_with_probability(prizes_data) if int(x.get("id", 0)) == int(prize.get("id", 0))), 0.0),
         "code": code,
         "redeemed": False,
         "created_at": created_at.isoformat(),
@@ -411,6 +482,8 @@ async def spin(request: Request):
         "prize_id": prize.get("id"),
         "prize_title": prize.get("title"),
         "prize_description": prize.get("description", ""),
+        "prize_weight": item["prize_weight"],
+        "prize_drop_percent": item["prize_drop_percent"],
         "code": code,
         "expires_at": expires_at.isoformat(),
         "expires_at_text": expires_at.strftime("%d.%m.%Y"),
@@ -456,7 +529,7 @@ async def admin_prizes(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    items = load_prizes()
+    items = enrich_prizes_with_probability(load_prizes())
     items.sort(key=lambda x: int(x.get("id", 0)))
     return {"ok": True, "items": items}
 
@@ -478,7 +551,7 @@ async def admin_prize_add(request: Request):
         "title": str(data.get("title", "")).strip(),
         "short": str(data.get("short", "")).strip(),
         "description": str(data.get("description", "")).strip(),
-        "weight": max(1, int(data.get("weight", 1))),
+        "weight": normalize_weight(data.get("weight", 1)),
         "active": bool(data.get("active", True)),
     }
 
@@ -487,8 +560,9 @@ async def admin_prize_add(request: Request):
 
     prizes_data.append(item)
     save_prizes(prizes_data)
-    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes_data}
+    items = enrich_prizes_with_probability(load_prizes())
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/prize/update")
@@ -500,9 +574,12 @@ async def admin_prize_update(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    prize_id = int(data.get("prize_id"))
-    prizes_data = load_prizes()
+    try:
+        prize_id = int(data.get("prize_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
+    prizes_data = load_prizes()
     target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
     if not target:
         return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
@@ -510,12 +587,16 @@ async def admin_prize_update(request: Request):
     target["title"] = str(data.get("title", "")).strip()
     target["short"] = str(data.get("short", "")).strip()
     target["description"] = str(data.get("description", "")).strip()
-    target["weight"] = max(1, int(data.get("weight", 1)))
+    target["weight"] = normalize_weight(data.get("weight", 1))
     target["active"] = bool(data.get("active", True))
 
+    if not target["title"] or not target["short"] or not target["description"]:
+        return JSONResponse({"ok": False, "error": "Заполните все поля"}, status_code=400)
+
     save_prizes(prizes_data)
-    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes_data}
+    items = enrich_prizes_with_probability(load_prizes())
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/prize/update-weight")
@@ -527,9 +608,12 @@ async def admin_prize_update_weight(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    prize_id = int(data.get("prize_id"))
-    weight = max(1, int(data.get("weight", 1)))
+    try:
+        prize_id = int(data.get("prize_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
+    weight = normalize_weight(data.get("weight", 1))
     prizes_data = load_prizes()
     target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
     if not target:
@@ -537,8 +621,9 @@ async def admin_prize_update_weight(request: Request):
 
     target["weight"] = weight
     save_prizes(prizes_data)
-    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes_data}
+    items = enrich_prizes_with_probability(load_prizes())
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/prize/toggle")
@@ -550,17 +635,21 @@ async def admin_prize_toggle(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    prize_id = int(data.get("prize_id"))
-    prizes_data = load_prizes()
+    try:
+        prize_id = int(data.get("prize_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
+    prizes_data = load_prizes()
     target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
     if not target:
         return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
 
     target["active"] = not bool(target.get("active", True))
     save_prizes(prizes_data)
-    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes_data}
+    items = enrich_prizes_with_probability(load_prizes())
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/prize/delete")
@@ -572,7 +661,11 @@ async def admin_prize_delete(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    prize_id = int(data.get("prize_id"))
+    try:
+        prize_id = int(data.get("prize_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
+
     history_data = load_history()
     linked = next((x for x in history_data if int(x.get("prize_id", 0)) == prize_id), None)
     if linked:
@@ -584,8 +677,9 @@ async def admin_prize_delete(request: Request):
     prizes_data = load_prizes()
     prizes_data = [x for x in prizes_data if int(x.get("id")) != prize_id]
     save_prizes(prizes_data)
-    prizes_data.sort(key=lambda x: int(x.get("id", 0)))
-    return {"ok": True, "items": prizes_data}
+    items = enrich_prizes_with_probability(load_prizes())
+    items.sort(key=lambda x: int(x.get("id", 0)))
+    return {"ok": True, "items": items}
 
 
 @app.post("/admin/code/check")
@@ -608,6 +702,8 @@ async def admin_code_check(request: Request):
         "code": item.get("code"),
         "redeemed": item.get("redeemed", False),
         "prize_title": item.get("prize_title", "Приз"),
+        "prize_weight": item.get("prize_weight"),
+        "prize_drop_percent": item.get("prize_drop_percent"),
     }
 
 
