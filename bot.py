@@ -8,6 +8,9 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
+import psycopg
+from psycopg.rows import dict_row
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
@@ -25,37 +28,28 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 BACKEND_URL = os.getenv("BACKEND_URL", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "igadget-wheel-secret").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
 ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
 
-PRIZES_FILE = "prizes.json"
-USED_CODES_FILE = "used_codes.json"
-HISTORY_FILE = "history.json"
 WEBHOOK_PATH = "/telegram-webhook"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
-def read_json_file(path, default):
-    if not os.path.exists(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def write_json_file(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def db_conn():
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def normalize_weight(value, default=1.0):
@@ -69,81 +63,86 @@ def normalize_weight(value, default=1.0):
 
 
 def normalize_image_url(value):
-    url = str(value or "").strip()
-    if not url:
+    value = str(value or "").strip()
+    if not value:
         return ""
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
     return ""
 
 
-def ensure_files():
-    if not os.path.exists(PRIZES_FILE):
-        write_json_file(PRIZES_FILE, [
-            {
-                "id": 1,
-                "title": "Скидка 5% на аксессуары",
-                "short": "-5%",
-                "description": "Скидка 5% на аксессуары.",
-                "image_url": "",
-                "weight": 35,
-                "active": True
-            },
-            {
-                "id": 2,
-                "title": "Скидка 10% на аксессуары",
-                "short": "-10%",
-                "description": "Скидка 10% на аксессуары.",
-                "image_url": "",
-                "weight": 22,
-                "active": True
-            },
-            {
-                "id": 3,
-                "title": "Скидка 15% на аксессуары",
-                "short": "-15%",
-                "description": "Скидка 15% на аксессуары.",
-                "image_url": "",
-                "weight": 12,
-                "active": True
-            },
-            {
-                "id": 4,
-                "title": "Бесплатная доставка",
-                "short": "Дост.",
-                "description": "Бесплатная доставка на заказ.",
-                "image_url": "",
-                "weight": 14,
-                "active": True
-            },
-            {
-                "id": 5,
-                "title": "Подарок к покупке",
-                "short": "Подарок",
-                "description": "Небольшой подарок при следующей покупке.",
-                "image_url": "",
-                "weight": 10,
-                "active": True
-            },
-            {
-                "id": 6,
-                "title": "Бонус 500",
-                "short": "500",
-                "description": "500 бонусов на следующий заказ.",
-                "image_url": "",
-                "weight": 7,
-                "active": True
-            }
-        ])
+def init_db():
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS prizes (
+                    id BIGSERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    short TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    image_url TEXT NOT NULL DEFAULT '',
+                    weight DOUBLE PRECISION NOT NULL DEFAULT 1,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
 
-    if not os.path.exists(USED_CODES_FILE):
-        write_json_file(USED_CODES_FILE, [])
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS used_codes (
+                    code TEXT PRIMARY KEY,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
 
-    if not os.path.exists(HISTORY_FILE):
-        write_json_file(HISTORY_FILE, [])
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS spin_history (
+                    id BIGINT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    telegram_id TEXT NOT NULL,
+                    first_name TEXT,
+                    username TEXT,
+                    prize_id BIGINT NOT NULL,
+                    prize_title TEXT NOT NULL,
+                    prize_description TEXT NOT NULL DEFAULT '',
+                    prize_image_url TEXT NOT NULL DEFAULT '',
+                    prize_weight DOUBLE PRECISION NOT NULL DEFAULT 1,
+                    prize_drop_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    code TEXT NOT NULL UNIQUE,
+                    redeemed BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    created_at_text TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    expires_at_text TEXT NOT NULL,
+                    spin_date_msk TEXT NOT NULL
+                )
+            """)
 
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_spin_history_user_id
+                ON spin_history (user_id)
+            """)
 
-ensure_files()
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_spin_history_spin_date_msk
+                ON spin_history (spin_date_msk)
+            """)
+
+            cur.execute("SELECT COUNT(*) AS count FROM prizes")
+            count = cur.fetchone()["count"]
+
+            if count == 0:
+                cur.executemany("""
+                    INSERT INTO prizes (title, short, description, image_url, weight, active)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, [
+                    ("Скидка 5% на аксессуары", "-5%", "Скидка 5% на аксессуары.", "", 35, True),
+                    ("Скидка 10% на аксессуары", "-10%", "Скидка 10% на аксессуары.", "", 22, True),
+                    ("Скидка 15% на аксессуары", "-15%", "Скидка 15% на аксессуары.", "", 12, True),
+                    ("Бесплатная доставка", "Дост.", "Бесплатная доставка на заказ.", "", 14, True),
+                    ("Подарок к покупке", "Подарок", "Небольшой подарок при следующей покупке.", "", 10, True),
+                    ("Бонус 500", "500", "500 бонусов на следующий заказ.", "", 7, True),
+                ])
+        conn.commit()
 
 
 def parse_init_data(init_data: str) -> dict:
@@ -193,13 +192,17 @@ def get_user_from_init_data(init_data: str):
 
 
 def load_prizes():
-    items = read_json_file(PRIZES_FILE, [])
-    if not isinstance(items, list):
-        return []
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, title, short, description, image_url, weight, active
+                FROM prizes
+                ORDER BY id ASC
+            """)
+            items = cur.fetchall()
+
     normalized = []
     for index, item in enumerate(items, start=1):
-        if not isinstance(item, dict):
-            continue
         normalized.append({
             "id": int(item.get("id", index)),
             "title": str(item.get("title", "")).strip(),
@@ -227,44 +230,167 @@ def enrich_prizes_with_probability(items):
     return prizes
 
 
-def save_prizes(items):
-    normalized = []
-    for index, item in enumerate(items or [], start=1):
-        if not isinstance(item, dict):
-            continue
-        normalized.append({
-            "id": int(item.get("id", index)),
-            "title": str(item.get("title", "")).strip(),
-            "short": str(item.get("short", "")).strip(),
-            "description": str(item.get("description", "")).strip(),
-            "image_url": normalize_image_url(item.get("image_url", "")),
-            "weight": normalize_weight(item.get("weight", 1)),
-            "active": bool(item.get("active", True)),
-        })
-    write_json_file(PRIZES_FILE, normalized)
+def save_prize(item):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO prizes (title, short, description, image_url, weight, active)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                str(item.get("title", "")).strip(),
+                str(item.get("short", "")).strip(),
+                str(item.get("description", "")).strip(),
+                normalize_image_url(item.get("image_url", "")),
+                normalize_weight(item.get("weight", 1)),
+                bool(item.get("active", True)),
+            ))
+            row = cur.fetchone()
+        conn.commit()
+    return int(row["id"])
 
 
-def load_used_codes():
-    return read_json_file(USED_CODES_FILE, [])
+def update_prize(prize_id, item):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE prizes
+                SET title = %s,
+                    short = %s,
+                    description = %s,
+                    image_url = %s,
+                    weight = %s,
+                    active = %s
+                WHERE id = %s
+            """, (
+                str(item.get("title", "")).strip(),
+                str(item.get("short", "")).strip(),
+                str(item.get("description", "")).strip(),
+                normalize_image_url(item.get("image_url", "")),
+                normalize_weight(item.get("weight", 1)),
+                bool(item.get("active", True)),
+                int(prize_id),
+            ))
+        conn.commit()
 
 
-def save_used_codes(items):
-    write_json_file(USED_CODES_FILE, items)
+def update_prize_weight(prize_id, weight):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE prizes
+                SET weight = %s
+                WHERE id = %s
+            """, (normalize_weight(weight), int(prize_id)))
+        conn.commit()
+
+
+def toggle_prize(prize_id):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE prizes
+                SET active = NOT active
+                WHERE id = %s
+                RETURNING id
+            """, (int(prize_id),))
+            row = cur.fetchone()
+        conn.commit()
+    return row is not None
+
+
+def delete_prize(prize_id):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM prizes WHERE id = %s", (int(prize_id),))
+        conn.commit()
+
+
+def prize_exists(prize_id):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM prizes WHERE id = %s", (int(prize_id),))
+            return cur.fetchone() is not None
+
+
+def load_used_code(code):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT code FROM used_codes WHERE code = %s", (str(code),))
+            return cur.fetchone() is not None
+
+
+def save_used_code(code):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO used_codes (code)
+                VALUES (%s)
+                ON CONFLICT (code) DO NOTHING
+            """, (str(code),))
+        conn.commit()
 
 
 def load_history():
-    return read_json_file(HISTORY_FILE, [])
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *
+                FROM spin_history
+                ORDER BY created_at DESC
+            """)
+            return cur.fetchall()
 
 
-def save_history(items):
-    write_json_file(HISTORY_FILE, items)
+def save_history_item(item):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO spin_history (
+                    id, user_id, telegram_id, first_name, username,
+                    prize_id, prize_title, prize_description, prize_image_url,
+                    prize_weight, prize_drop_percent, code, redeemed,
+                    created_at, created_at_text, expires_at, expires_at_text, spin_date_msk
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
+            """, (
+                int(item["id"]),
+                str(item["user_id"]),
+                str(item["telegram_id"]),
+                item.get("first_name"),
+                item.get("username"),
+                int(item["prize_id"]),
+                str(item["prize_title"]),
+                str(item.get("prize_description", "")),
+                str(item.get("prize_image_url", "")),
+                float(item["prize_weight"]),
+                float(item["prize_drop_percent"]),
+                str(item["code"]),
+                bool(item["redeemed"]),
+                item["created_at"],
+                str(item["created_at_text"]),
+                item["expires_at"],
+                str(item["expires_at_text"]),
+                str(item["spin_date_msk"]),
+            ))
+        conn.commit()
 
 
 def load_user_history(user_id):
-    items = load_history()
-    user_items = [x for x in items if str(x.get("user_id")) == str(user_id)]
-    user_items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return user_items
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *
+                FROM spin_history
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+            """, (str(user_id),))
+            return cur.fetchall()
 
 
 def generate_code(length=6):
@@ -273,16 +399,11 @@ def generate_code(length=6):
 
 
 def generate_unique_code():
-    used_codes = load_used_codes()
-    used_set = {str(x) for x in used_codes}
-
     for _ in range(50):
         code = generate_code()
-        if code not in used_set:
-            used_codes.append(code)
-            save_used_codes(used_codes)
+        if not load_used_code(code):
+            save_used_code(code)
             return code
-
     raise RuntimeError("Could not generate unique code")
 
 
@@ -313,12 +434,16 @@ def today_key_msk():
 
 
 def find_user_spin_today(user_id):
-    items = load_user_history(user_id)
-    key = today_key_msk()
-    for item in items:
-        if item.get("spin_date_msk") == key:
-            return item
-    return None
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *
+                FROM spin_history
+                WHERE user_id = %s AND spin_date_msk = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (str(user_id), today_key_msk()))
+            return cur.fetchone()
 
 
 def is_admin(user):
@@ -375,15 +500,27 @@ async def bonus_text_handler(message: Message):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[startup] init_db...")
+    init_db()
+    print("[startup] database ready")
+
     webhook_url = f"{BACKEND_URL.rstrip('/')}{WEBHOOK_PATH}" if BACKEND_URL else ""
+    print(f"[startup] BACKEND_URL={BACKEND_URL}")
+    print(f"[startup] webhook_url={webhook_url}")
 
     if webhook_url.startswith("https://"):
-        await bot.set_webhook(
-            url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True,
-        )
+        try:
+            await bot.set_webhook(
+                url=webhook_url,
+                secret_token=WEBHOOK_SECRET,
+                drop_pending_updates=True,
+            )
+            print("[startup] webhook set successfully")
+        except Exception as e:
+            print(f"[startup] webhook set error: {e}")
+
     yield
+
     try:
         await bot.delete_webhook(drop_pending_updates=False)
     finally:
@@ -413,6 +550,7 @@ def health():
         "bot": True,
         "webapp_url_set": bool(WEBAPP_URL),
         "backend_url_set": bool(BACKEND_URL),
+        "database_url_set": bool(DATABASE_URL),
     }
 
 
@@ -494,16 +632,14 @@ async def spin(request: Request):
         ),
         "code": code,
         "redeemed": False,
-        "created_at": created_at.isoformat(),
+        "created_at": created_at,
         "created_at_text": created_at.strftime("%d.%m.%Y %H:%M"),
-        "expires_at": expires_at.isoformat(),
+        "expires_at": expires_at,
         "expires_at_text": expires_at.strftime("%d.%m.%Y"),
         "spin_date_msk": today_key_msk(),
     }
 
-    history = load_history()
-    history.append(item)
-    save_history(history)
+    save_history_item(item)
 
     return {
         "ok": True,
@@ -572,11 +708,7 @@ async def admin_prize_add(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    prizes_data = load_prizes()
-    next_id = max([int(x.get("id", 0)) for x in prizes_data], default=0) + 1
-
     item = {
-        "id": next_id,
         "title": str(data.get("title", "")).strip(),
         "short": str(data.get("short", "")).strip(),
         "description": str(data.get("description", "")).strip(),
@@ -588,8 +720,7 @@ async def admin_prize_add(request: Request):
     if not item["title"] or not item["short"] or not item["description"]:
         return JSONResponse({"ok": False, "error": "Заполните все поля"}, status_code=400)
 
-    prizes_data.append(item)
-    save_prizes(prizes_data)
+    save_prize(item)
     items = enrich_prizes_with_probability(load_prizes())
     items.sort(key=lambda x: int(x.get("id", 0)))
     return {"ok": True, "items": items}
@@ -609,22 +740,22 @@ async def admin_prize_update(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
-    prizes_data = load_prizes()
-    target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
-    if not target:
+    if not prize_exists(prize_id):
         return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
 
-    target["title"] = str(data.get("title", "")).strip()
-    target["short"] = str(data.get("short", "")).strip()
-    target["description"] = str(data.get("description", "")).strip()
-    target["image_url"] = normalize_image_url(data.get("image_url", ""))
-    target["weight"] = normalize_weight(data.get("weight", 1))
-    target["active"] = bool(data.get("active", True))
+    item = {
+        "title": str(data.get("title", "")).strip(),
+        "short": str(data.get("short", "")).strip(),
+        "description": str(data.get("description", "")).strip(),
+        "image_url": normalize_image_url(data.get("image_url", "")),
+        "weight": normalize_weight(data.get("weight", 1)),
+        "active": bool(data.get("active", True)),
+    }
 
-    if not target["title"] or not target["short"] or not target["description"]:
+    if not item["title"] or not item["short"] or not item["description"]:
         return JSONResponse({"ok": False, "error": "Заполните все поля"}, status_code=400)
 
-    save_prizes(prizes_data)
+    update_prize(prize_id, item)
     items = enrich_prizes_with_probability(load_prizes())
     items.sort(key=lambda x: int(x.get("id", 0)))
     return {"ok": True, "items": items}
@@ -644,14 +775,10 @@ async def admin_prize_update_weight(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
-    weight = normalize_weight(data.get("weight", 1))
-    prizes_data = load_prizes()
-    target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
-    if not target:
+    if not prize_exists(prize_id):
         return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
 
-    target["weight"] = weight
-    save_prizes(prizes_data)
+    update_prize_weight(prize_id, data.get("weight", 1))
     items = enrich_prizes_with_probability(load_prizes())
     items.sort(key=lambda x: int(x.get("id", 0)))
     return {"ok": True, "items": items}
@@ -671,13 +798,10 @@ async def admin_prize_toggle(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
-    prizes_data = load_prizes()
-    target = next((x for x in prizes_data if int(x.get("id")) == prize_id), None)
-    if not target:
+    if not prize_exists(prize_id):
         return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
 
-    target["active"] = not bool(target.get("active", True))
-    save_prizes(prizes_data)
+    toggle_prize(prize_id)
     items = enrich_prizes_with_probability(load_prizes())
     items.sort(key=lambda x: int(x.get("id", 0)))
     return {"ok": True, "items": items}
@@ -697,17 +821,26 @@ async def admin_prize_delete(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Некорректный prize_id"}, status_code=400)
 
-    history_data = load_history()
-    linked = next((x for x in history_data if int(x.get("prize_id", 0)) == prize_id), None)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id
+                FROM spin_history
+                WHERE prize_id = %s
+                LIMIT 1
+            """, (prize_id,))
+            linked = cur.fetchone()
+
     if linked:
         return JSONResponse(
             {"ok": False, "error": "Нельзя удалить приз, который уже есть в истории"},
             status_code=400
         )
 
-    prizes_data = load_prizes()
-    prizes_data = [x for x in prizes_data if int(x.get("id")) != prize_id]
-    save_prizes(prizes_data)
+    if not prize_exists(prize_id):
+        return JSONResponse({"ok": False, "error": "Приз не найден"}, status_code=404)
+
+    delete_prize(prize_id)
     items = enrich_prizes_with_probability(load_prizes())
     items.sort(key=lambda x: int(x.get("id", 0)))
     return {"ok": True, "items": items}
@@ -723,8 +856,16 @@ async def admin_code_check(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    history_data = load_history()
-    item = next((x for x in history_data if x.get("code") == code), None)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *
+                FROM spin_history
+                WHERE code = %s
+                LIMIT 1
+            """, (code,))
+            item = cur.fetchone()
+
     if not item:
         return {"ok": False, "error": "Код не найден"}
 
@@ -733,9 +874,9 @@ async def admin_code_check(request: Request):
         "code": item.get("code"),
         "redeemed": item.get("redeemed", False),
         "prize_title": item.get("prize_title", "Приз"),
-        "prize_image_url": item.get("prize_image_url", ""),
         "prize_weight": item.get("prize_weight"),
         "prize_drop_percent": item.get("prize_drop_percent"),
+        "prize_image_url": item.get("prize_image_url", ""),
     }
 
 
@@ -749,21 +890,33 @@ async def admin_code_redeem(request: Request):
     if not is_admin(user):
         return JSONResponse({"ok": False, "error": "Нет доступа"}, status_code=403)
 
-    history_data = load_history()
-    item = next((x for x in history_data if x.get("code") == code), None)
-    if not item:
-        return {"ok": False, "error": "Код не найден"}
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *
+                FROM spin_history
+                WHERE code = %s
+                LIMIT 1
+            """, (code,))
+            item = cur.fetchone()
 
-    if item.get("redeemed"):
-        return {
-            "ok": False,
-            "error": "Код уже погашен",
-            "code": item.get("code"),
-            "prize_title": item.get("prize_title", "Приз"),
-        }
+            if not item:
+                return {"ok": False, "error": "Код не найден"}
 
-    item["redeemed"] = True
-    save_history(history_data)
+            if item.get("redeemed"):
+                return {
+                    "ok": False,
+                    "error": "Код уже погашен",
+                    "code": item.get("code"),
+                    "prize_title": item.get("prize_title", "Приз"),
+                }
+
+            cur.execute("""
+                UPDATE spin_history
+                SET redeemed = TRUE
+                WHERE code = %s
+            """, (code,))
+        conn.commit()
 
     return {
         "ok": True,
