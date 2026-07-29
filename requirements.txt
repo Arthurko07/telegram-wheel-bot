@@ -1,4 +1,5 @@
 aiogram==3.20.0.post0
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
+psycopg[binary]
