@@ -68,6 +68,15 @@ def normalize_weight(value, default=1.0):
     return round(weight, 3)
 
 
+def normalize_image_url(value):
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return ""
+
+
 def ensure_files():
     if not os.path.exists(PRIZES_FILE):
         write_json_file(PRIZES_FILE, [
@@ -76,6 +85,7 @@ def ensure_files():
                 "title": "Скидка 5% на аксессуары",
                 "short": "-5%",
                 "description": "Скидка 5% на аксессуары.",
+                "image_url": "",
                 "weight": 35,
                 "active": True
             },
@@ -84,6 +94,7 @@ def ensure_files():
                 "title": "Скидка 10% на аксессуары",
                 "short": "-10%",
                 "description": "Скидка 10% на аксессуары.",
+                "image_url": "",
                 "weight": 22,
                 "active": True
             },
@@ -92,6 +103,7 @@ def ensure_files():
                 "title": "Скидка 15% на аксессуары",
                 "short": "-15%",
                 "description": "Скидка 15% на аксессуары.",
+                "image_url": "",
                 "weight": 12,
                 "active": True
             },
@@ -100,6 +112,7 @@ def ensure_files():
                 "title": "Бесплатная доставка",
                 "short": "Дост.",
                 "description": "Бесплатная доставка на заказ.",
+                "image_url": "",
                 "weight": 14,
                 "active": True
             },
@@ -108,6 +121,7 @@ def ensure_files():
                 "title": "Подарок к покупке",
                 "short": "Подарок",
                 "description": "Небольшой подарок при следующей покупке.",
+                "image_url": "",
                 "weight": 10,
                 "active": True
             },
@@ -116,6 +130,7 @@ def ensure_files():
                 "title": "Бонус 500",
                 "short": "500",
                 "description": "500 бонусов на следующий заказ.",
+                "image_url": "",
                 "weight": 7,
                 "active": True
             }
@@ -190,6 +205,7 @@ def load_prizes():
             "title": str(item.get("title", "")).strip(),
             "short": str(item.get("short", "")).strip(),
             "description": str(item.get("description", "")).strip(),
+            "image_url": normalize_image_url(item.get("image_url", "")),
             "weight": normalize_weight(item.get("weight", 1)),
             "active": bool(item.get("active", True)),
         })
@@ -203,6 +219,7 @@ def enrich_prizes_with_probability(items):
 
     for item in prizes:
         item["weight"] = normalize_weight(item.get("weight", 1))
+        item["image_url"] = normalize_image_url(item.get("image_url", ""))
         if item.get("active", True) and total_weight > 0:
             item["drop_percent"] = round((item["weight"] / total_weight) * 100, 2)
         else:
@@ -220,6 +237,7 @@ def save_prizes(items):
             "title": str(item.get("title", "")).strip(),
             "short": str(item.get("short", "")).strip(),
             "description": str(item.get("description", "")).strip(),
+            "image_url": normalize_image_url(item.get("image_url", "")),
             "weight": normalize_weight(item.get("weight", 1)),
             "active": bool(item.get("active", True)),
         })
@@ -410,6 +428,7 @@ def prizes():
             "title": item.get("title"),
             "short": item.get("short"),
             "description": item.get("description", ""),
+            "image_url": item.get("image_url", ""),
             "active": bool(item.get("active", True)),
         })
 
@@ -438,6 +457,7 @@ async def spin(request: Request):
             "error": "Сегодня вы уже использовали попытку.",
             "last_code": existing_today.get("code"),
             "last_prize_title": existing_today.get("prize_title"),
+            "last_prize_image_url": existing_today.get("prize_image_url", ""),
             "last_expires_at_text": existing_today.get("expires_at_text"),
         }
 
@@ -462,8 +482,16 @@ async def spin(request: Request):
         "prize_id": prize.get("id"),
         "prize_title": prize.get("title"),
         "prize_description": prize.get("description", ""),
+        "prize_image_url": prize.get("image_url", ""),
         "prize_weight": normalize_weight(prize.get("weight", 1)),
-        "prize_drop_percent": next((x.get("drop_percent", 0.0) for x in enrich_prizes_with_probability(prizes_data) if int(x.get("id", 0)) == int(prize.get("id", 0))), 0.0),
+        "prize_drop_percent": next(
+            (
+                x.get("drop_percent", 0.0)
+                for x in enrich_prizes_with_probability(prizes_data)
+                if int(x.get("id", 0)) == int(prize.get("id", 0))
+            ),
+            0.0
+        ),
         "code": code,
         "redeemed": False,
         "created_at": created_at.isoformat(),
@@ -482,6 +510,7 @@ async def spin(request: Request):
         "prize_id": prize.get("id"),
         "prize_title": prize.get("title"),
         "prize_description": prize.get("description", ""),
+        "prize_image_url": prize.get("image_url", ""),
         "prize_weight": item["prize_weight"],
         "prize_drop_percent": item["prize_drop_percent"],
         "code": code,
@@ -551,6 +580,7 @@ async def admin_prize_add(request: Request):
         "title": str(data.get("title", "")).strip(),
         "short": str(data.get("short", "")).strip(),
         "description": str(data.get("description", "")).strip(),
+        "image_url": normalize_image_url(data.get("image_url", "")),
         "weight": normalize_weight(data.get("weight", 1)),
         "active": bool(data.get("active", True)),
     }
@@ -587,6 +617,7 @@ async def admin_prize_update(request: Request):
     target["title"] = str(data.get("title", "")).strip()
     target["short"] = str(data.get("short", "")).strip()
     target["description"] = str(data.get("description", "")).strip()
+    target["image_url"] = normalize_image_url(data.get("image_url", ""))
     target["weight"] = normalize_weight(data.get("weight", 1))
     target["active"] = bool(data.get("active", True))
 
@@ -702,6 +733,7 @@ async def admin_code_check(request: Request):
         "code": item.get("code"),
         "redeemed": item.get("redeemed", False),
         "prize_title": item.get("prize_title", "Приз"),
+        "prize_image_url": item.get("prize_image_url", ""),
         "prize_weight": item.get("prize_weight"),
         "prize_drop_percent": item.get("prize_drop_percent"),
     }
