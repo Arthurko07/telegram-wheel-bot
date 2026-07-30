@@ -1,10 +1,7 @@
 import os
-import hmac
-import json
 import uuid
 import time
-import hashlib
-import secrets
+import json
 import logging
 import asyncio
 from pathlib import Path
@@ -37,18 +34,14 @@ from aiogram.types import (
     WebAppInfo,
     BotCommand,
 )
-
-# =========================================================
-# CONFIG
-# =========================================================
+from aiogram.utils.web_app import safe_parse_webapp_init_data
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wheel.db")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
-DEBUG_AUTH = os.getenv("DEBUG_AUTH", "true").lower() == "true"
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://telegram-wheel-bot-production-764c.up.railway.app")
-APP_VERSION = "9.1.0-aiogram-fastapi-fixed"
+APP_VERSION = "10.0.0-safe-initdata"
 
 UPLOAD_DIR = "uploads"
 STATIC_DIR = "static"
@@ -84,9 +77,6 @@ bot: Optional[Bot] = None
 dp: Optional[Dispatcher] = None
 polling_task: Optional[asyncio.Task] = None
 
-# =========================================================
-# MODELS
-# =========================================================
 
 class User(Base):
     __tablename__ = "users"
@@ -134,14 +124,10 @@ class SpinResult(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# =========================================================
-# DB MIGRATION HELPERS
-# =========================================================
 
 def ensure_sqlite_column_exists():
     if not DATABASE_URL.startswith("sqlite"):
         return
-
     with engine.connect() as conn:
         rows = conn.exec_driver_sql("PRAGMA table_info(prizes)").fetchall()
         columns = {row[1] for row in rows}
@@ -149,11 +135,9 @@ def ensure_sqlite_column_exists():
             conn.exec_driver_sql("ALTER TABLE prizes ADD COLUMN image_url VARCHAR")
             conn.commit()
 
+
 ensure_sqlite_column_exists()
 
-# =========================================================
-# HELPERS
-# =========================================================
 
 def get_db():
     db = SessionLocal()
@@ -161,11 +145,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
-
-def log_auth(message: str):
-    if DEBUG_AUTH:
-        print(f"[TG_AUTH] {message}", flush=True)
 
 
 def now_utc() -> datetime:
@@ -201,6 +180,7 @@ def build_absolute_upload_url(request: Request, filename: str) -> str:
 
 
 def generate_code() -> str:
+    import secrets
     return "IG-" + secrets.token_hex(3).upper()
 
 
@@ -246,6 +226,7 @@ def get_today_bounds_msk_utc_naive():
 
 
 def weighted_pick(prizes: list[Prize]) -> Prize:
+    import secrets
     total = sum(max(0, p.weight) for p in prizes)
     if total <= 0:
         raise HTTPException(status_code=400, detail="Нет доступных призов")
@@ -258,97 +239,51 @@ def weighted_pick(prizes: list[Prize]) -> Prize:
     return prizes[-1]
 
 
-def parse_init_data(init_data: str) -> dict:
-    pairs = [chunk.split("=", 1) for chunk in init_data.split("&") if "=" in chunk]
-    return {k: v for k, v in pairs}
+def parse_admin_ids() -> set[int]:
+    return {int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()}
 
 
-def build_data_check_string(data: dict) -> str:
-    return "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-
-
-def verify_telegram_init_data(init_data: str) -> dict:
-    if not init_data:
-        log_auth("ERROR: empty init_data")
+def extract_init_data(payload: dict) -> str:
+    raw = payload.get("init_data") or payload.get("initData") or ""
+    raw = str(raw).strip()
+    if not raw:
         raise HTTPException(status_code=401, detail="init_data is required")
-
-    if not BOT_TOKEN:
-        log_auth("ERROR: BOT_TOKEN not configured")
-        raise HTTPException(status_code=500, detail="BOT_TOKEN not configured")
-
-    data = parse_init_data(init_data)
-    received_hash = data.pop("hash", None)
-
-    if not received_hash:
-        log_auth("ERROR: hash missing in init_data")
-        raise HTTPException(status_code=401, detail="Invalid Telegram auth data: hash missing")
-
-    auth_date = data.get("auth_date")
-    if auth_date:
-        try:
-            auth_ts = int(auth_date)
-            now_ts = int(time.time())
-            age = now_ts - auth_ts
-            log_auth(f"auth_date present, age={age}s")
-            if age > 86400:
-                log_auth(f"ERROR: init_data expired, age={age}s")
-                raise HTTPException(status_code=401, detail="Telegram init data expired")
-        except ValueError:
-            log_auth("ERROR: invalid auth_date format")
-            raise HTTPException(status_code=401, detail="Invalid auth_date")
-
-    data_check_string = build_data_check_string(data)
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(calculated_hash, received_hash):
-        log_auth("ERROR: hash mismatch")
-        log_auth(f"received_hash={received_hash}")
-        log_auth(f"calculated_hash={calculated_hash}")
-        log_auth(f"data_keys={sorted(list(data.keys()))}")
-        log_auth(f"data_check_string={data_check_string}")
-        raise HTTPException(status_code=401, detail="Telegram auth verification failed")
-
-    user_raw = data.get("user")
-    if not user_raw:
-        log_auth("ERROR: user missing in init_data")
-        raise HTTPException(status_code=401, detail="Telegram user not found in init_data")
-
-    try:
-        user = json.loads(user_raw)
-    except json.JSONDecodeError:
-        log_auth(f"ERROR: invalid user payload: {user_raw}")
-        raise HTTPException(status_code=401, detail="Invalid Telegram user payload")
-
-    log_auth(f"SUCCESS: telegram_id={user.get('id')}, username={user.get('username')}")
-    return user
+    return raw
 
 
 def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
-    tg_user = verify_telegram_init_data(init_data)
-    telegram_id = int(tg_user["id"])
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="BOT_TOKEN not configured")
 
-    admin_ids = {int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()}
+    try:
+        parsed = safe_parse_webapp_init_data(token=BOT_TOKEN, init_data=init_data)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=f"Telegram auth failed: {str(e)}")
+
+    if not parsed.user:
+        raise HTTPException(status_code=401, detail="Telegram user not found in init_data")
+
+    tg_user = parsed.user
+    telegram_id = int(tg_user.id)
+    admin_ids = parse_admin_ids()
     is_admin = telegram_id in admin_ids
-
-    log_auth(f"user telegram_id={telegram_id}, is_admin={is_admin}")
 
     user = db.query(User).filter(User.telegram_id == telegram_id).first()
     if not user:
         user = User(
             telegram_id=telegram_id,
-            username=tg_user.get("username"),
-            first_name=tg_user.get("first_name"),
-            last_name=tg_user.get("last_name"),
+            username=tg_user.username,
+            first_name=tg_user.first_name,
+            last_name=tg_user.last_name,
             is_admin=is_admin,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
     else:
-        user.username = tg_user.get("username")
-        user.first_name = tg_user.get("first_name")
-        user.last_name = tg_user.get("last_name")
+        user.username = tg_user.username
+        user.first_name = tg_user.first_name
+        user.last_name = tg_user.last_name
         user.is_admin = is_admin
         db.commit()
         db.refresh(user)
@@ -357,20 +292,16 @@ def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
 
 
 def require_user(payload: dict, db: Session) -> User:
-    init_data = payload.get("init_data", "")
+    init_data = extract_init_data(payload)
     return get_or_create_user_from_init_data(init_data, db)
 
 
 def require_admin(payload: dict, db: Session) -> User:
     user = require_user(payload, db)
     if not user.is_admin:
-        log_auth(f"ERROR: telegram_id={user.telegram_id} is not admin")
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
-# =========================================================
-# AIOGRAM
-# =========================================================
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -411,36 +342,17 @@ async def cmd_help(message: Message):
 
 async def handle_text(message: Message):
     text = (message.text or "").strip()
-
     if text == "ℹ️ Как это работает":
         await cmd_help(message)
         return
-
-    if text == "🔄 Открыть заново":
-        await message.answer(
-            "Нажми кнопку ниже, чтобы снова открыть приложение.",
-            reply_markup=build_main_keyboard(),
-        )
+    if text in {"🔄 Открыть заново", "🎡 Открыть колесо"}:
+        await message.answer("Нажми кнопку Mini App ниже.", reply_markup=build_main_keyboard())
         return
-
-    if text == "🎡 Открыть колесо":
-        await message.answer(
-            "Нажми кнопку Mini App ниже.",
-            reply_markup=build_main_keyboard(),
-        )
-        return
-
-    await message.answer(
-        "Используй /start или кнопку «🎡 Открыть колесо».",
-        reply_markup=build_main_keyboard(),
-    )
+    await message.answer("Используй /start или кнопку «🎡 Открыть колесо».", reply_markup=build_main_keyboard())
 
 
 async def handle_web_app_data(message: Message):
-    await message.answer(
-        "Данные из Mini App получены.",
-        reply_markup=build_main_keyboard(),
-    )
+    await message.answer("Данные из Mini App получены.", reply_markup=build_main_keyboard())
 
 
 def register_aiogram_handlers(dispatcher: Dispatcher):
@@ -452,7 +364,6 @@ def register_aiogram_handlers(dispatcher: Dispatcher):
 
 async def start_aiogram_bot():
     global bot, dp, polling_task
-
     if not BOT_TOKEN:
         logger.warning("BOT_TOKEN is empty, aiogram bot will not start")
         return
@@ -477,7 +388,6 @@ async def start_aiogram_bot():
 
 async def stop_aiogram_bot():
     global bot, dp, polling_task
-
     if polling_task:
         polling_task.cancel()
         try:
@@ -491,9 +401,6 @@ async def stop_aiogram_bot():
         await bot.session.close()
         logger.info("Aiogram bot stopped")
 
-# =========================================================
-# FASTAPI LIFESPAN
-# =========================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -502,6 +409,7 @@ async def lifespan(app: FastAPI):
     yield
     await stop_aiogram_bot()
     logger.info("Unified app stopped")
+
 
 app = FastAPI(title="Telegram Wheel Bot API", version=APP_VERSION, lifespan=lifespan)
 
@@ -520,9 +428,6 @@ if os.path.isdir(UPLOAD_DIR):
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# =========================================================
-# HTML ROUTES
-# =========================================================
 
 @app.get("/", include_in_schema=False)
 async def mini_app_root():
@@ -534,9 +439,6 @@ async def mini_app_root():
         "version": APP_VERSION,
     }
 
-# =========================================================
-# PUBLIC ENDPOINTS
-# =========================================================
 
 @app.get("/health")
 async def health():
@@ -545,42 +447,46 @@ async def health():
 
 @app.get("/debug/env")
 async def debug_env():
-    admin_ids = [x.strip() for x in ADMIN_IDS_RAW.split(",") if x.strip()]
     return {
         "ok": True,
         "version": APP_VERSION,
-        "database_url_prefix": DATABASE_URL.split("://")[0] if "://" in DATABASE_URL else DATABASE_URL,
         "bot_token_configured": bool(BOT_TOKEN),
-        "bot_token_prefix": BOT_TOKEN[:10] + "..." if BOT_TOKEN else "",
-        "admin_ids_raw": admin_ids,
-        "debug_auth": DEBUG_AUTH,
         "web_app_url": WEB_APP_URL,
+        "admin_ids": list(parse_admin_ids()),
         "has_index_html": os.path.exists(INDEX_FILE),
     }
 
 
 @app.post("/debug/check-init-data")
 async def debug_check_init_data(payload: dict):
-    init_data = payload.get("init_data", "")
+    init_data = extract_init_data(payload)
+    if not BOT_TOKEN:
+        return {"ok": False, "detail": "BOT_TOKEN not configured"}
+
     try:
-        user = verify_telegram_init_data(init_data)
-        return {"ok": True, "user": user}
-    except HTTPException as e:
+        parsed = safe_parse_webapp_init_data(token=BOT_TOKEN, init_data=init_data)
+        user = parsed.user
         return {
-            "ok": False,
-            "status_code": e.status_code,
-            "detail": e.detail,
+            "ok": True,
+            "auth_date": str(parsed.auth_date) if parsed.auth_date else None,
+            "chat_type": parsed.chat_type,
+            "chat_instance": parsed.chat_instance,
+            "query_id": parsed.query_id,
+            "start_param": parsed.start_param,
+            "user": {
+                "id": user.id if user else None,
+                "username": user.username if user else None,
+                "first_name": user.first_name if user else None,
+                "last_name": user.last_name if user else None,
+            } if user else None,
         }
+    except ValueError as e:
+        return {"ok": False, "detail": str(e)}
 
 
 @app.get("/prizes")
 async def get_prizes(db: Session = Depends(get_db)):
-    items = (
-        db.query(Prize)
-        .filter(Prize.active == True)
-        .order_by(Prize.id.asc())
-        .all()
-    )
+    items = db.query(Prize).filter(Prize.active == True).order_by(Prize.id.asc()).all()
     return {"ok": True, "items": [serialize_prize(item) for item in items]}
 
 
@@ -614,16 +520,11 @@ async def spin(payload: dict, db: Session = Depends(get_db)):
             "last_image_url": last_prize.image_url if last_prize else None,
         }
 
-    available_prizes = (
-        db.query(Prize)
-        .filter(Prize.active == True, Prize.weight > 0)
-        .all()
-    )
+    available_prizes = db.query(Prize).filter(Prize.active == True, Prize.weight > 0).all()
     if not available_prizes:
         raise HTTPException(status_code=400, detail="Нет активных призов")
 
     prize = weighted_pick(available_prizes)
-
     created_at = now_utc()
     expires_at = created_at + timedelta(days=7)
 
@@ -662,17 +563,9 @@ async def spin(payload: dict, db: Session = Depends(get_db)):
 @app.post("/history")
 async def history(payload: dict, db: Session = Depends(get_db)):
     user = require_user(payload, db)
-    items = (
-        db.query(SpinResult)
-        .filter(SpinResult.user_id == user.id)
-        .order_by(SpinResult.id.desc())
-        .all()
-    )
+    items = db.query(SpinResult).filter(SpinResult.user_id == user.id).order_by(SpinResult.id.desc()).all()
     return {"ok": True, "items": [spin_to_dict(item) for item in items]}
 
-# =========================================================
-# ADMIN ENDPOINTS
-# =========================================================
 
 @app.post("/admin/me")
 async def admin_me(payload: dict, db: Session = Depends(get_db)):
@@ -724,13 +617,7 @@ async def admin_upload_prize_image(
             buffer.write(chunk)
 
     image_url = build_absolute_upload_url(request, filename)
-
-    return {
-        "ok": True,
-        "filename": filename,
-        "image_url": image_url,
-        "prize_image_url": image_url,
-    }
+    return {"ok": True, "filename": filename, "image_url": image_url, "prize_image_url": image_url}
 
 
 @app.post("/admin/prizes")
@@ -767,17 +654,12 @@ async def admin_prize_add(payload: dict, db: Session = Depends(get_db)):
         active=active,
         image_url=image_url,
     )
-
     db.add(prize)
     db.commit()
     db.refresh(prize)
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
-    return {
-        "ok": True,
-        "item": serialize_prize(prize),
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "item": serialize_prize(prize), "items": [serialize_prize(item) for item in items]}
 
 
 @app.post("/admin/prize/update")
@@ -816,11 +698,7 @@ async def admin_prize_update(payload: dict, db: Session = Depends(get_db)):
     db.refresh(prize)
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
-    return {
-        "ok": True,
-        "item": serialize_prize(prize),
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "item": serialize_prize(prize), "items": [serialize_prize(item) for item in items]}
 
 
 @app.post("/admin/prize/update-weight")
@@ -901,7 +779,6 @@ async def admin_code_check(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Код не найден")
 
     prize = spin.prize
-
     return {
         "ok": True,
         "code": spin.code,
@@ -939,7 +816,6 @@ async def admin_code_redeem(payload: dict, db: Session = Depends(get_db)):
     db.refresh(spin)
 
     prize = spin.prize
-
     return {
         "ok": True,
         "code": spin.code,
