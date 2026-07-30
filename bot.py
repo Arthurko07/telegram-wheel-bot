@@ -23,10 +23,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
-# =========================================================
-# CONFIG
-# =========================================================
-
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wheel.db")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
@@ -64,10 +60,6 @@ app.add_middleware(
 )
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
-# =========================================================
-# DB MODELS
-# =========================================================
 
 class User(Base):
     __tablename__ = "users"
@@ -115,9 +107,6 @@ class SpinResult(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# =========================================================
-# SQLITE LIGHT MIGRATION
-# =========================================================
 
 def ensure_sqlite_column_exists():
     if not DATABASE_URL.startswith("sqlite"):
@@ -130,11 +119,9 @@ def ensure_sqlite_column_exists():
             conn.exec_driver_sql("ALTER TABLE prizes ADD COLUMN image_url VARCHAR")
             conn.commit()
 
+
 ensure_sqlite_column_exists()
 
-# =========================================================
-# DEPENDENCIES
-# =========================================================
 
 def get_db():
     db = SessionLocal()
@@ -143,20 +130,20 @@ def get_db():
     finally:
         db.close()
 
-# =========================================================
-# UTILS
-# =========================================================
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
 def moscow_now() -> datetime:
     return now_utc() + timedelta(hours=3)
+
 
 def format_dt(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
         return None
     return dt.strftime("%d.%m.%Y %H:%M")
+
 
 def format_expiry_human(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
@@ -171,11 +158,14 @@ def format_expiry_human(dt: Optional[datetime]) -> Optional[str]:
         return f"завтра до {dt.strftime('%H:%M')}"
     return dt.strftime("%d.%m.%Y %H:%M")
 
+
 def build_absolute_upload_url(request: Request, filename: str) -> str:
     return str(request.base_url).rstrip("/") + f"/uploads/{filename}"
 
+
 def generate_code() -> str:
     return "IG-" + secrets.token_hex(3).upper()
+
 
 def serialize_prize(prize: Prize) -> dict:
     return {
@@ -188,6 +178,7 @@ def serialize_prize(prize: Prize) -> dict:
         "image_url": prize.image_url,
         "prize_image_url": prize.image_url,
     }
+
 
 def spin_to_dict(spin: SpinResult) -> dict:
     prize = spin.prize
@@ -207,6 +198,7 @@ def spin_to_dict(spin: SpinResult) -> dict:
         "prize_image_url": image_url,
     }
 
+
 def get_today_bounds_msk_utc_naive():
     now_msk = moscow_now()
     start_msk = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -214,6 +206,7 @@ def get_today_bounds_msk_utc_naive():
     start_utc = start_msk - timedelta(hours=3)
     end_utc = end_msk - timedelta(hours=3)
     return start_utc, end_utc
+
 
 def weighted_pick(prizes: list[Prize]) -> Prize:
     total = sum(max(0, p.weight) for p in prizes)
@@ -227,13 +220,11 @@ def weighted_pick(prizes: list[Prize]) -> Prize:
             return prize
     return prizes[-1]
 
-# =========================================================
-# TELEGRAM AUTH
-# =========================================================
 
 def parse_init_data(init_data: str) -> dict:
     pairs = [chunk.split("=", 1) for chunk in init_data.split("&") if "=" in chunk]
     return {k: v for k, v in pairs}
+
 
 def verify_telegram_init_data(init_data: str) -> dict:
     if not init_data:
@@ -265,6 +256,7 @@ def verify_telegram_init_data(init_data: str) -> dict:
 
     return user
 
+
 def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
     tg_user = verify_telegram_init_data(init_data)
     telegram_id = int(tg_user["id"])
@@ -294,9 +286,11 @@ def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
 
     return user
 
+
 def require_user(payload: dict, db: Session) -> User:
     init_data = payload.get("init_data", "")
     return get_or_create_user_from_init_data(init_data, db)
+
 
 def require_admin(payload: dict, db: Session) -> User:
     user = require_user(payload, db)
@@ -304,17 +298,11 @@ def require_admin(payload: dict, db: Session) -> User:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
-# =========================================================
-# BASIC
-# =========================================================
 
 @app.get("/")
 async def root():
     return {"ok": True, "service": "telegram-wheel-bot-api", "version": "7.1.0"}
 
-# =========================================================
-# PUBLIC / USER ENDPOINTS
-# =========================================================
 
 @app.get("/prizes")
 async def get_prizes(db: Session = Depends(get_db)):
@@ -324,10 +312,8 @@ async def get_prizes(db: Session = Depends(get_db)):
         .order_by(Prize.id.asc())
         .all()
     )
-    return {
-        "ok": True,
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
 
 @app.post("/spin")
 async def spin(payload: dict, db: Session = Depends(get_db)):
@@ -403,6 +389,7 @@ async def spin(payload: dict, db: Session = Depends(get_db)):
         "prize_image_url": prize.image_url,
     }
 
+
 @app.post("/history")
 async def history(payload: dict, db: Session = Depends(get_db)):
     user = require_user(payload, db)
@@ -414,14 +401,8 @@ async def history(payload: dict, db: Session = Depends(get_db)):
         .all()
     )
 
-    return {
-        "ok": True,
-        "items": [spin_to_dict(item) for item in items],
-    }
+    return {"ok": True, "items": [spin_to_dict(item) for item in items]}
 
-# =========================================================
-# ADMIN PROFILE
-# =========================================================
 
 @app.post("/admin/me")
 async def admin_me(payload: dict, db: Session = Depends(get_db)):
@@ -435,9 +416,6 @@ async def admin_me(payload: dict, db: Session = Depends(get_db)):
         "is_admin": admin.is_admin,
     }
 
-# =========================================================
-# IMAGE UPLOAD
-# =========================================================
 
 @app.post("/admin/upload-prize-image")
 async def admin_upload_prize_image(
@@ -484,19 +462,14 @@ async def admin_upload_prize_image(
         "prize_image_url": image_url,
     }
 
-# =========================================================
-# ADMIN PRIZES
-# =========================================================
 
 @app.post("/admin/prizes")
 async def admin_prizes(payload: dict, db: Session = Depends(get_db)):
     require_admin(payload, db)
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
-    return {
-        "ok": True,
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
 
 @app.post("/admin/prize/add")
 async def admin_prize_add(payload: dict, db: Session = Depends(get_db)):
@@ -536,6 +509,7 @@ async def admin_prize_add(payload: dict, db: Session = Depends(get_db)):
         "item": serialize_prize(prize),
         "items": [serialize_prize(item) for item in items],
     }
+
 
 @app.post("/admin/prize/update")
 async def admin_prize_update(payload: dict, db: Session = Depends(get_db)):
@@ -579,6 +553,7 @@ async def admin_prize_update(payload: dict, db: Session = Depends(get_db)):
         "items": [serialize_prize(item) for item in items],
     }
 
+
 @app.post("/admin/prize/update-weight")
 async def admin_prize_update_weight(payload: dict, db: Session = Depends(get_db)):
     require_admin(payload, db)
@@ -600,10 +575,8 @@ async def admin_prize_update_weight(payload: dict, db: Session = Depends(get_db)
     db.commit()
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
-    return {
-        "ok": True,
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
 
 @app.post("/admin/prize/toggle")
 async def admin_prize_toggle(payload: dict, db: Session = Depends(get_db)):
@@ -618,10 +591,8 @@ async def admin_prize_toggle(payload: dict, db: Session = Depends(get_db)):
     db.commit()
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
-    return {
-        "ok": True,
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
 
 @app.post("/admin/prize/delete")
 async def admin_prize_delete(payload: dict, db: Session = Depends(get_db)):
@@ -645,14 +616,8 @@ async def admin_prize_delete(payload: dict, db: Session = Depends(get_db)):
     db.commit()
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
-    return {
-        "ok": True,
-        "items": [serialize_prize(item) for item in items],
-    }
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
 
-# =========================================================
-# ADMIN CODES
-# =========================================================
 
 @app.post("/admin/code/check")
 async def admin_code_check(payload: dict, db: Session = Depends(get_db)):
@@ -683,6 +648,7 @@ async def admin_code_check(payload: dict, db: Session = Depends(get_db)):
         "prize_image_url": prize.image_url if prize else None,
         "user_id": spin.user.telegram_id if spin.user else None,
     }
+
 
 @app.post("/admin/code/redeem")
 async def admin_code_redeem(payload: dict, db: Session = Depends(get_db)):
@@ -716,9 +682,6 @@ async def admin_code_redeem(payload: dict, db: Session = Depends(get_db)):
         "prize_image_url": prize.image_url if prize else None,
     }
 
-# =========================================================
-# SEED
-# =========================================================
 
 @app.post("/admin/seed-default-prizes")
 async def admin_seed_default_prizes(payload: dict, db: Session = Depends(get_db)):
