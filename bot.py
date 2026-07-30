@@ -5,7 +5,9 @@ import uuid
 import time
 import hashlib
 import secrets
+import logging
 from pathlib import Path
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -24,16 +26,42 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
+from telegram import (
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+    WebAppInfo,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+# =========================================================
+# CONFIG
+# =========================================================
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wheel.db")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
 DEBUG_AUTH = os.getenv("DEBUG_AUTH", "true").lower() == "true"
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://telegram-wheel-bot-production-764c.up.railway.app")
+APP_VERSION = "8.2.0-unified"
 
 UPLOAD_DIR = "uploads"
 MAX_FILE_SIZE_MB = 10
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
+
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("wheel-app")
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
@@ -50,19 +78,11 @@ Base = declarative_base()
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-app = FastAPI(title="Telegram Wheel Bot API", version="7.2.2-debug-auth")
+telegram_app: Optional[Application] = None
 
-origins = ["*"] if CORS_ORIGINS_RAW == "*" else [x.strip() for x in CORS_ORIGINS_RAW.split(",") if x.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
+# =========================================================
+# MODELS
+# =========================================================
 
 class User(Base):
     __tablename__ = "users"
@@ -110,6 +130,9 @@ class SpinResult(Base):
 
 Base.metadata.create_all(bind=engine)
 
+# =========================================================
+# DB MIGRATION HELPERS
+# =========================================================
 
 def ensure_sqlite_column_exists():
     if not DATABASE_URL.startswith("sqlite"):
@@ -122,9 +145,11 @@ def ensure_sqlite_column_exists():
             conn.exec_driver_sql("ALTER TABLE prizes ADD COLUMN image_url VARCHAR")
             conn.commit()
 
-
 ensure_sqlite_column_exists()
 
+# =========================================================
+# HELPERS
+# =========================================================
 
 def get_db():
     db = SessionLocal()
@@ -316,7 +341,6 @@ def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
         db.add(user)
         db.commit()
         db.refresh(user)
-        log_auth(f"created local user id={user.id}")
     else:
         user.username = tg_user.get("username")
         user.first_name = tg_user.get("first_name")
@@ -324,7 +348,6 @@ def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
         user.is_admin = is_admin
         db.commit()
         db.refresh(user)
-        log_auth(f"updated local user id={user.id}")
 
     return user
 
@@ -341,10 +364,173 @@ def require_admin(payload: dict, db: Session) -> User:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
+# =========================================================
+# TELEGRAM BOT
+# =========================================================
+
+def build_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="🎡 Открыть колесо",
+                    web_app=WebAppInfo(url=WEB_APP_URL),
+                )
+            ],
+            [
+                KeyboardButton(text="ℹ️ Как это работает"),
+                KeyboardButton(text="🔄 Открыть заново"),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    text = (
+        "Привет! Это бот колеса бонусов iGadget.\n\n"
+        "Нажми кнопку ниже, чтобы открыть Mini App и прокрутить колесо."
+    )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=build_main_keyboard(),
+    )
+
+
+async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    text = (
+        "Как использовать бота:\n"
+        "1. Нажми «🎡 Открыть колесо».\n"
+        "2. Mini App откроется внутри Telegram.\n"
+        "3. Нажми кнопку старта на колесе и получи приз."
+    )
+    await update.message.reply_text(text, reply_markup=build_main_keyboard())
+
+
+async def tg_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+
+    if text == "ℹ️ Как это работает":
+        await tg_help(update, context)
+        return
+
+    if text == "🔄 Открыть заново":
+        await update.message.reply_text(
+            "Нажми кнопку ниже, чтобы снова открыть приложение.",
+            reply_markup=build_main_keyboard(),
+        )
+        return
+
+    if text == "🎡 Открыть колесо":
+        await update.message.reply_text(
+            "Открываю Mini App. Если кнопка не сработала, нажми её ещё раз.",
+            reply_markup=build_main_keyboard(),
+        )
+        return
+
+    await update.message.reply_text(
+        "Используй /start или кнопку «🎡 Открыть колесо».",
+        reply_markup=build_main_keyboard(),
+    )
+
+
+async def tg_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_message.web_app_data:
+        return
+
+    await update.effective_message.reply_text(
+        "Данные из Mini App получены.",
+        reply_markup=build_main_keyboard(),
+    )
+
+
+async def init_telegram_bot():
+    global telegram_app
+
+    if not BOT_TOKEN:
+        logger.warning("BOT_TOKEN is empty, telegram bot will not start")
+        return
+
+    telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+    telegram_app.add_handler(CommandHandler("start", tg_start))
+    telegram_app.add_handler(CommandHandler("help", tg_help))
+    telegram_app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, tg_web_app_data))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_text_router))
+
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+    try:
+        await telegram_app.bot.set_my_commands([
+            ("start", "Запустить бота"),
+            ("help", "Помощь"),
+        ])
+        me = await telegram_app.bot.get_me()
+        logger.info("Telegram bot started as @%s (%s)", me.username, me.id)
+    except Exception as e:
+        logger.exception("Telegram bot post-init failed: %s", e)
+
+
+async def stop_telegram_bot():
+    global telegram_app
+
+    if not telegram_app:
+        return
+
+    try:
+        if telegram_app.updater:
+            await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        logger.info("Telegram bot stopped")
+    except Exception as e:
+        logger.exception("Telegram bot stop failed: %s", e)
+
+# =========================================================
+# FASTAPI LIFESPAN
+# =========================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting unified app %s", APP_VERSION)
+    await init_telegram_bot()
+    yield
+    await stop_telegram_bot()
+    logger.info("Unified app stopped")
+
+app = FastAPI(title="Telegram Wheel Bot API", version=APP_VERSION, lifespan=lifespan)
+
+origins = ["*"] if CORS_ORIGINS_RAW == "*" else [x.strip() for x in CORS_ORIGINS_RAW.split(",") if x.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+# =========================================================
+# PUBLIC ENDPOINTS
+# =========================================================
 
 @app.get("/")
 async def root():
-    return {"ok": True, "service": "telegram-wheel-bot-api", "version": "7.2.2-debug-auth"}
+    return {"ok": True, "service": "telegram-wheel-bot-api", "version": APP_VERSION}
 
 
 @app.get("/debug/env")
@@ -352,11 +538,13 @@ async def debug_env():
     admin_ids = [x.strip() for x in ADMIN_IDS_RAW.split(",") if x.strip()]
     return {
         "ok": True,
+        "version": APP_VERSION,
         "database_url_prefix": DATABASE_URL.split("://")[0] if "://" in DATABASE_URL else DATABASE_URL,
         "bot_token_configured": bool(BOT_TOKEN),
         "bot_token_prefix": BOT_TOKEN[:10] + "..." if BOT_TOKEN else "",
         "admin_ids_raw": admin_ids,
         "debug_auth": DEBUG_AUTH,
+        "web_app_url": WEB_APP_URL,
     }
 
 
@@ -471,6 +659,9 @@ async def history(payload: dict, db: Session = Depends(get_db)):
     )
     return {"ok": True, "items": [spin_to_dict(item) for item in items]}
 
+# =========================================================
+# ADMIN ENDPOINTS
+# =========================================================
 
 @app.post("/admin/me")
 async def admin_me(payload: dict, db: Session = Depends(get_db)):
