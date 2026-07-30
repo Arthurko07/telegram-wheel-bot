@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from sqlalchemy import (
     create_engine,
     Column,
@@ -34,7 +35,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     WebAppInfo,
-    Update,
+    BotCommand,
 )
 
 # =========================================================
@@ -47,9 +48,12 @@ ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
 DEBUG_AUTH = os.getenv("DEBUG_AUTH", "true").lower() == "true"
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://telegram-wheel-bot-production-764c.up.railway.app")
-APP_VERSION = "9.0.0-aiogram-fastapi"
+APP_VERSION = "9.1.0-aiogram-fastapi-fixed"
 
 UPLOAD_DIR = "uploads"
+STATIC_DIR = "static"
+INDEX_FILE = os.path.join(STATIC_DIR, "index.html")
+
 MAX_FILE_SIZE_MB = 10
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
@@ -74,6 +78,7 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(STATIC_DIR, exist_ok=True)
 
 bot: Optional[Bot] = None
 dp: Optional[Dispatcher] = None
@@ -458,14 +463,16 @@ async def start_aiogram_bot():
 
     await bot.delete_webhook(drop_pending_updates=False)
     await bot.set_my_commands([
-        ("start", "Запустить бота"),
-        ("help", "Помощь"),
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="help", description="Помощь"),
     ])
 
     me = await bot.get_me()
     logger.info("Aiogram bot started as @%s (%s)", me.username, me.id)
 
-    polling_task = asyncio.create_task(dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()))
+    polling_task = asyncio.create_task(
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    )
 
 
 async def stop_aiogram_bot():
@@ -507,14 +514,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+if os.path.isdir(UPLOAD_DIR):
+    app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# =========================================================
+# HTML ROUTES
+# =========================================================
+
+@app.get("/", include_in_schema=False)
+async def mini_app_root():
+    if os.path.exists(INDEX_FILE):
+        return FileResponse(INDEX_FILE)
+    return {
+        "ok": True,
+        "message": "Mini App index.html not found. Put your frontend into static/index.html",
+        "version": APP_VERSION,
+    }
 
 # =========================================================
 # PUBLIC ENDPOINTS
 # =========================================================
 
-@app.get("/")
-async def root():
+@app.get("/health")
+async def health():
     return {"ok": True, "service": "telegram-wheel-bot-api", "version": APP_VERSION}
 
 
@@ -530,6 +555,7 @@ async def debug_env():
         "admin_ids_raw": admin_ids,
         "debug_auth": DEBUG_AUTH,
         "web_app_url": WEB_APP_URL,
+        "has_index_html": os.path.exists(INDEX_FILE),
     }
 
 
@@ -847,13 +873,13 @@ async def admin_prize_delete(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Приз не найден")
 
     if prize.image_url and "/uploads/" in prize.image_url:
-      filename = prize.image_url.split("/uploads/")[-1]
-      filepath = os.path.join(UPLOAD_DIR, filename)
-      if os.path.exists(filepath):
-          try:
-              os.remove(filepath)
-          except Exception:
-              pass
+        filename = prize.image_url.split("/uploads/")[-1]
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
 
     db.delete(prize)
     db.commit()
