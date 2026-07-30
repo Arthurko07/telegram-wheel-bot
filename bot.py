@@ -1,7 +1,5 @@
 import os
 import uuid
-import time
-import json
 import logging
 import asyncio
 from pathlib import Path
@@ -41,7 +39,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://telegram-wheel-bot-production-764c.up.railway.app")
-APP_VERSION = "10.0.0-safe-initdata"
+APP_VERSION = "11.0.0-full-bundle"
 
 UPLOAD_DIR = "uploads"
 STATIC_DIR = "static"
@@ -265,8 +263,7 @@ def get_or_create_user_from_init_data(init_data: str, db: Session) -> User:
 
     tg_user = parsed.user
     telegram_id = int(tg_user.id)
-    admin_ids = parse_admin_ids()
-    is_admin = telegram_id in admin_ids
+    is_admin = telegram_id in parse_admin_ids()
 
     user = db.query(User).filter(User.telegram_id == telegram_id).first()
     if not user:
@@ -306,16 +303,8 @@ def require_admin(payload: dict, db: Session) -> User:
 def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [
-                KeyboardButton(
-                    text="🎡 Открыть колесо",
-                    web_app=WebAppInfo(url=WEB_APP_URL),
-                )
-            ],
-            [
-                KeyboardButton(text="ℹ️ Как это работает"),
-                KeyboardButton(text="🔄 Открыть заново"),
-            ],
+            [KeyboardButton(text="🎡 Открыть колесо", web_app=WebAppInfo(url=WEB_APP_URL))],
+            [KeyboardButton(text="ℹ️ Как это работает"), KeyboardButton(text="🔄 Открыть заново")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -323,21 +312,17 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
 
 
 async def cmd_start(message: Message):
-    text = (
-        "Привет! Это бот колеса бонусов iGadget.\n\n"
-        "Нажми кнопку ниже, чтобы открыть Mini App и прокрутить колесо."
+    await message.answer(
+        "Привет! Нажми кнопку ниже, чтобы открыть Mini App.",
+        reply_markup=build_main_keyboard(),
     )
-    await message.answer(text, reply_markup=build_main_keyboard())
 
 
 async def cmd_help(message: Message):
-    text = (
-        "Как использовать бота:\n"
-        "1. Нажми «🎡 Открыть колесо».\n"
-        "2. Mini App откроется внутри Telegram.\n"
-        "3. Нажми кнопку старта на колесе и получи приз."
+    await message.answer(
+        "1. Открой Mini App\n2. Проверь initData\n3. Крути колесо",
+        reply_markup=build_main_keyboard(),
     )
-    await message.answer(text, reply_markup=build_main_keyboard())
 
 
 async def handle_text(message: Message):
@@ -348,11 +333,11 @@ async def handle_text(message: Message):
     if text in {"🔄 Открыть заново", "🎡 Открыть колесо"}:
         await message.answer("Нажми кнопку Mini App ниже.", reply_markup=build_main_keyboard())
         return
-    await message.answer("Используй /start или кнопку «🎡 Открыть колесо».", reply_markup=build_main_keyboard())
+    await message.answer("Используй /start.", reply_markup=build_main_keyboard())
 
 
 async def handle_web_app_data(message: Message):
-    await message.answer("Данные из Mini App получены.", reply_markup=build_main_keyboard())
+    await message.answer("Данные Mini App получены.", reply_markup=build_main_keyboard())
 
 
 def register_aiogram_handlers(dispatcher: Dispatcher):
@@ -396,7 +381,6 @@ async def stop_aiogram_bot():
             pass
         except Exception as e:
             logger.exception("Polling stop failed: %s", e)
-
     if bot:
         await bot.session.close()
         logger.info("Aiogram bot stopped")
@@ -433,11 +417,7 @@ if os.path.isdir(STATIC_DIR):
 async def mini_app_root():
     if os.path.exists(INDEX_FILE):
         return FileResponse(INDEX_FILE)
-    return {
-        "ok": True,
-        "message": "Mini App index.html not found. Put your frontend into static/index.html",
-        "version": APP_VERSION,
-    }
+    return {"ok": True, "message": "Put frontend into static/index.html", "version": APP_VERSION}
 
 
 @app.get("/health")
@@ -540,7 +520,6 @@ async def spin(payload: dict, db: Session = Depends(get_db)):
         created_at=created_at,
         expires_at=expires_at,
     )
-
     db.add(result)
     db.commit()
     db.refresh(result)
