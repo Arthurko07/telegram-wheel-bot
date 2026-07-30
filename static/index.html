@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>iGadget Wheel Debug</title>
+  <title>iGadget Wheel</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
@@ -40,7 +40,7 @@
       display: grid;
       gap: 12px;
     }
-    h1, h2, p { margin: 0; }
+    h1, h2, h3, p { margin: 0; }
     .hero { text-align: center; gap: 8px; }
     .hero h1 { font-size: 28px; line-height: 1.05; font-weight: 800; letter-spacing: -0.04em; }
     .hero p { color: var(--muted); font-size: 14px; line-height: 1.55; }
@@ -57,7 +57,7 @@
     .status.ok { color: #d9f8e6; border-color: rgba(88,214,141,.22); background: rgba(88,214,141,.08); }
     .status.error { color: #ffd5de; border-color: rgba(255,122,146,.22); background: rgba(255,122,146,.08); }
     .status.warn { color: #ffe5bf; border-color: rgba(243,181,98,.22); background: rgba(243,181,98,.08); }
-    .toolbar, .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .toolbar, .row, .actions { display: flex; gap: 10px; flex-wrap: wrap; }
     button {
       border: 0;
       border-radius: 14px;
@@ -94,11 +94,97 @@
       font-size: 12px;
       font-weight: 800;
     }
-    .admin-block { display: none; gap: 12px; }
-    .admin-block.show { display: grid; }
+    .grid { display: grid; gap: 12px; }
+    .wheel-shell {
+      display: grid;
+      place-items: center;
+      padding: 10px 0 4px;
+    }
+    .wheel-wrap {
+      position: relative;
+      width: min(100%, 320px);
+      aspect-ratio: 1 / 1;
+    }
+    .pointer {
+      position: absolute;
+      top: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 0;
+      height: 0;
+      border-left: 12px solid transparent;
+      border-right: 12px solid transparent;
+      border-top: 20px solid var(--danger);
+      z-index: 5;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      filter: drop-shadow(0 18px 28px rgba(0,0,0,.28));
+    }
+    .center-btn {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 88px;
+      height: 88px;
+      border-radius: 999px;
+      color: #08130c;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      z-index: 6;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      box-shadow: 0 10px 24px rgba(53,191,118,.22);
+    }
+    .hidden { display: none !important; }
+    .result-box, .history-list, .admin-block { display: grid; gap: 10px; }
+    .result-card, .history-item, .prize-item {
+      border-radius: 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: var(--card-2);
+      display: grid;
+      gap: 8px;
+    }
+    .result-title, .prize-title {
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+    .code-box {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(88,214,141,.08);
+      border: 1px solid rgba(88,214,141,.2);
+    }
+    .history-top, .prize-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .badge-ok { color: #d9f8e6; background: rgba(88,214,141,.08); border: 1px solid rgba(88,214,141,.2); }
+    .badge-off { color: #ffd5de; background: rgba(255,122,146,.08); border: 1px solid rgba(255,122,146,.2); }
     .field { display: grid; gap: 6px; }
     .field label { color: var(--muted); font-size: 13px; font-weight: 700; }
-    .field input, .field textarea {
+    .field input, .field textarea, .field select {
       width: 100%;
       border-radius: 14px;
       border: 1px solid var(--line);
@@ -109,44 +195,118 @@
       outline: none;
     }
     .field textarea { min-height: 92px; resize: vertical; }
-    .prize-list { display: grid; gap: 10px; }
-    .prize-item {
-      border-radius: 18px;
-      padding: 14px;
-      border: 1px solid var(--line);
-      background: var(--card-2);
+    .tabs {
       display: grid;
+      grid-template-columns: repeat(4, 1fr);
       gap: 8px;
     }
-    .prize-title { font-size: 16px; font-weight: 800; }
+    .tab {
+      min-height: 44px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.04);
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+    .tab.active {
+      color: #08130c;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      border: 0;
+    }
   </style>
 </head>
 <body>
   <div class="app">
     <section class="card hero">
       <h1>Колесо бонусов iGadget</h1>
-      <p>Диагностическая версия для проверки initData и админки.</p>
+      <p>Один запуск в день. Получайте скидку, бонус или подарок.</p>
     </section>
 
     <section class="card">
+      <div class="tabs">
+        <button class="tab active" id="tabWheel">Колесо</button>
+        <button class="tab" id="tabHistory">Мои призы</button>
+        <button class="tab" id="tabAdmin">Админ</button>
+        <button class="tab" id="tabDebug">Debug</button>
+      </div>
+    </section>
+
+    <section class="card" id="panelWheel">
+      <div class="status" id="statusBox">Инициализация...</div>
+
+      <div class="wheel-shell">
+        <div class="wheel-wrap">
+          <div class="pointer"></div>
+          <canvas id="wheel" width="360" height="360"></canvas>
+          <button class="center-btn" id="spinBtn">КРУТИТЬ</button>
+        </div>
+      </div>
+
+      <div class="small">Попытка доступна один раз в день.</div>
+
+      <div class="result-box hidden" id="resultBox">
+        <div class="result-card">
+          <div class="result-title" id="resultPrizeTitle">—</div>
+          <div class="small" id="resultPrizeDesc">—</div>
+          <div class="code-box" id="resultCode">—</div>
+          <div class="small" id="resultExpires">—</div>
+          <div class="actions">
+            <button class="btn-primary" id="copyCodeBtn">Скопировать код</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card hidden" id="panelHistory">
+      <h2>Мои призы</h2>
+      <div class="history-list" id="historyList"></div>
+    </section>
+
+    <section class="card hidden" id="panelAdmin">
+      <div class="status" id="adminStatus">Проверяем доступ к админке...</div>
+
+      <div class="admin-block hidden" id="adminBlock">
+        <div class="grid">
+          <div class="field">
+            <label for="title">Название приза</label>
+            <input id="title" type="text" placeholder="Например: Скидка 10%" />
+          </div>
+
+          <div class="field">
+            <label for="short">Короткое имя</label>
+            <input id="short" type="text" placeholder="Например: 10%" />
+          </div>
+
+          <div class="field">
+            <label for="description">Описание</label>
+            <textarea id="description" placeholder="Описание приза"></textarea>
+          </div>
+
+          <div class="field">
+            <label for="weight">Вес</label>
+            <input id="weight" type="number" value="10" />
+          </div>
+
+          <div class="actions">
+            <button class="btn-primary" id="btnAddPrize">Добавить приз</button>
+            <button class="btn-secondary" id="btnLoadAdminPrizes">Обновить список</button>
+          </div>
+        </div>
+
+        <div class="history-list" id="adminPrizeList"></div>
+      </div>
+    </section>
+
+    <section class="card hidden" id="panelDebug">
       <div class="row">
         <span class="pill" id="platformPill">platform: —</span>
         <span class="pill" id="versionPill">tg version: —</span>
         <span class="pill" id="initLenPill">initData: 0</span>
       </div>
 
-      <div id="statusBox" class="status">Инициализация...</div>
-
-      <div class="toolbar">
+      <div class="actions">
         <button class="btn-primary" id="btnCheckInit">Проверить initData</button>
-        <button class="btn-secondary" id="btnCheckAdmin">Проверить админку</button>
-        <button class="btn-secondary" id="btnLoadPrizes">Загрузить призы</button>
+        <button class="btn-secondary" id="btnDebugEnv">Проверить env</button>
       </div>
-    </section>
-
-    <section class="card">
-      <h2>Диагностика</h2>
-      <div class="small">Фронт отправляет на сервер raw `Telegram.WebApp.initData`, а сервер проверяет его через aiogram safe_parse_webapp_init_data [web:2563][web:2432].</div>
 
       <div>
         <div class="small">initData</div>
@@ -154,42 +314,8 @@
       </div>
 
       <div>
-        <div class="small">Последний ответ сервера</div>
+        <div class="small">Ответ сервера</div>
         <div class="mono" id="serverResponseBox">—</div>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Админка</h2>
-      <div class="small">Если твой Telegram ID входит в `ADMIN_IDS`, блок ниже станет доступен после проверки [web:2563].</div>
-      <div id="adminStatus" class="status">Пока не проверяли доступ.</div>
-
-      <div id="adminBlock" class="admin-block">
-        <div class="field">
-          <label for="title">Название приза</label>
-          <input id="title" type="text" placeholder="Например: Скидка 10%" />
-        </div>
-
-        <div class="field">
-          <label for="short">Короткое имя</label>
-          <input id="short" type="text" placeholder="Например: 10%" />
-        </div>
-
-        <div class="field">
-          <label for="description">Описание</label>
-          <textarea id="description" placeholder="Описание приза"></textarea>
-        </div>
-
-        <div class="field">
-          <label for="weight">Вес</label>
-          <input id="weight" type="number" value="10" />
-        </div>
-
-        <div class="toolbar">
-          <button class="btn-primary" id="btnAddPrize">Добавить приз</button>
-        </div>
-
-        <div class="prize-list" id="prizeList"></div>
       </div>
     </section>
   </div>
@@ -198,16 +324,42 @@
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     const API_BASE = window.location.origin;
 
+    const tabWheel = document.getElementById("tabWheel");
+    const tabHistory = document.getElementById("tabHistory");
+    const tabAdmin = document.getElementById("tabAdmin");
+    const tabDebug = document.getElementById("tabDebug");
+
+    const panelWheel = document.getElementById("panelWheel");
+    const panelHistory = document.getElementById("panelHistory");
+    const panelAdmin = document.getElementById("panelAdmin");
+    const panelDebug = document.getElementById("panelDebug");
+
     const statusBox = document.getElementById("statusBox");
     const initDataBox = document.getElementById("initDataBox");
     const serverResponseBox = document.getElementById("serverResponseBox");
     const adminStatus = document.getElementById("adminStatus");
     const adminBlock = document.getElementById("adminBlock");
-    const prizeList = document.getElementById("prizeList");
+    const adminPrizeList = document.getElementById("adminPrizeList");
+    const historyList = document.getElementById("historyList");
 
     const platformPill = document.getElementById("platformPill");
     const versionPill = document.getElementById("versionPill");
     const initLenPill = document.getElementById("initLenPill");
+
+    const spinBtn = document.getElementById("spinBtn");
+    const wheelCanvas = document.getElementById("wheel");
+    const ctx = wheelCanvas.getContext("2d");
+
+    const resultBox = document.getElementById("resultBox");
+    const resultPrizeTitle = document.getElementById("resultPrizeTitle");
+    const resultPrizeDesc = document.getElementById("resultPrizeDesc");
+    const resultCode = document.getElementById("resultCode");
+    const resultExpires = document.getElementById("resultExpires");
+    const copyCodeBtn = document.getElementById("copyCodeBtn");
+
+    let prizes = [];
+    let currentRotation = 0;
+    let isSpinning = false;
 
     function setStatus(text, type = "") {
       statusBox.textContent = text;
@@ -253,6 +405,35 @@
       return tg?.initData || "";
     }
 
+    function switchTab(name) {
+      [tabWheel, tabHistory, tabAdmin, tabDebug].forEach((el) => el.classList.remove("active"));
+      [panelWheel, panelHistory, panelAdmin, panelDebug].forEach((el) => el.classList.add("hidden"));
+
+      if (name === "wheel") {
+        tabWheel.classList.add("active");
+        panelWheel.classList.remove("hidden");
+      }
+      if (name === "history") {
+        tabHistory.classList.add("active");
+        panelHistory.classList.remove("hidden");
+        loadHistory();
+      }
+      if (name === "admin") {
+        tabAdmin.classList.add("active");
+        panelAdmin.classList.remove("hidden");
+        checkAdmin();
+      }
+      if (name === "debug") {
+        tabDebug.classList.add("active");
+        panelDebug.classList.remove("hidden");
+      }
+    }
+
+    tabWheel.addEventListener("click", () => switchTab("wheel"));
+    tabHistory.addEventListener("click", () => switchTab("history"));
+    tabAdmin.addEventListener("click", () => switchTab("admin"));
+    tabDebug.addEventListener("click", () => switchTab("debug"));
+
     function renderTelegramInfo() {
       const initData = getInitData();
       platformPill.textContent = `platform: ${tg?.platform || "unknown"}`;
@@ -265,12 +446,11 @@
       const initData = getInitData();
 
       if (!initData) {
-        setStatus("initData пустой. Открой Mini App именно из Telegram.", "error");
+        setStatus("initData пустой. Открой Mini App из Telegram.", "error");
         serverResponseBox.textContent = "initData is empty";
         return;
       }
 
-      setStatus("Проверяем initData на сервере...");
       try {
         const data = await safeFetchJson(`${API_BASE}/debug/check-init-data`, {
           method: "POST",
@@ -290,59 +470,361 @@
       }
     }
 
+    async function debugEnv() {
+      try {
+        const data = await safeFetchJson(`${API_BASE}/debug/env`);
+        serverResponseBox.textContent = safeStringify(data);
+      } catch (e) {
+        serverResponseBox.textContent = String(e.message || e);
+      }
+    }
+
+    function fitLabel(label) {
+      if (!label) return ["Приз"];
+      const words = String(label).split(" ").filter(Boolean);
+      const lines = [];
+      let current = "";
+      for (const word of words) {
+        const test = current ? current + " " + word : word;
+        if (test.length <= 10) current = test;
+        else {
+          if (current) lines.push(current);
+          current = word;
+        }
+      }
+      if (current) lines.push(current);
+      return lines.slice(0, 3);
+    }
+
+    function shadeColor(hex, percent) {
+      const num = parseInt(hex.replace("#", ""), 16);
+      const amt = Math.round(2.55 * percent);
+      const r = Math.min(255, Math.max(0, (num >> 16) + amt));
+      const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00ff) + amt));
+      const b = Math.min(255, Math.max(0, (num & 0x0000ff) + amt));
+      return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
+    }
+
+    function drawTextInSector(lines, x, y, maxWidth, baseFont = 12) {
+      let fontSize = baseFont;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      while (fontSize >= 10) {
+        ctx.font = `800 ${fontSize}px Inter, sans-serif`;
+        const widest = Math.max(...lines.map(line => ctx.measureText(line).width));
+        if (widest <= maxWidth) break;
+        fontSize -= 0.5;
+      }
+
+      const lineHeight = fontSize + 2;
+      const startY = y - ((lines.length - 1) * lineHeight) / 2;
+
+      lines.forEach((line, i) => {
+        ctx.strokeStyle = "rgba(8,11,16,0.16)";
+        ctx.lineWidth = 3;
+        ctx.strokeText(line, x, startY + i * lineHeight);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(line, x, startY + i * lineHeight);
+      });
+    }
+
+    function drawWheel(items, rotationDeg = 0) {
+      const size = wheelCanvas.width;
+      const center = size / 2;
+      const radius = center - 18;
+
+      ctx.clearRect(0, 0, size, size);
+
+      ctx.beginPath();
+      ctx.arc(center, center, radius + 10, 0, Math.PI * 2);
+      ctx.fillStyle = "#0b1017";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(center, center, radius + 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#141c28";
+      ctx.fill();
+
+      if (!items.length) {
+        ctx.beginPath();
+        ctx.arc(center, center, radius, 0, Math.PI * 2);
+        ctx.fillStyle = "#293347";
+        ctx.fill();
+        return;
+      }
+
+      const total = items.length;
+      const arc = (Math.PI * 2) / total;
+      const rotationRad = rotationDeg * Math.PI / 180;
+      const palette = ["#31be73", "#ee718a", "#5f9ff1", "#d9a043", "#7c68de", "#a36fd0"];
+
+      for (let i = 0; i < total; i++) {
+        const start = -Math.PI / 2 + rotationRad + i * arc;
+        const end = start + arc;
+        const mid = start + arc / 2;
+        const color = palette[i % palette.length];
+
+        const grad = ctx.createLinearGradient(
+          center + Math.cos(start) * 28,
+          center + Math.sin(start) * 28,
+          center + Math.cos(end) * radius,
+          center + Math.sin(end) * radius
+        );
+        grad.addColorStop(0, shadeColor(color, -8));
+        grad.addColorStop(1, shadeColor(color, 1));
+
+        ctx.beginPath();
+        ctx.moveTo(center, center);
+        ctx.arc(center, center, radius, start, end);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(center, center);
+        ctx.arc(center, center, radius, start, end);
+        ctx.closePath();
+        ctx.lineWidth = 1.8;
+        ctx.strokeStyle = "rgba(7,10,16,0.32)";
+        ctx.stroke();
+
+        ctx.save();
+        ctx.translate(center, center);
+        ctx.rotate(mid);
+
+        const textLines = fitLabel(items[i].short || items[i].title || "Приз");
+        const textRadius = radius - 70;
+        const sectorWidth = Math.max(60, radius * arc * 0.64);
+
+        drawTextInSector(textLines, textRadius, 0, sectorWidth, 12);
+        ctx.restore();
+      }
+
+      ctx.beginPath();
+      ctx.arc(center, center, radius, 0, Math.PI * 2);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(255,255,255,0.11)";
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(center, center, 38, 0, Math.PI * 2);
+      ctx.fillStyle = "#172334";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(center, center, 38, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255,255,255,0.07)";
+      ctx.stroke();
+    }
+
+    async function loadPrizes() {
+      const data = await safeFetchJson(`${API_BASE}/prizes`);
+      prizes = data.items || [];
+      drawWheel(prizes, currentRotation);
+    }
+
+    function findPrizeIndexById(prizeId) {
+      return prizes.findIndex(p => Number(p.id) === Number(prizeId));
+    }
+
+    function animateSpinToPrize(prizeId) {
+      return new Promise((resolve) => {
+        const index = findPrizeIndexById(prizeId);
+        if (index < 0) {
+          resolve();
+          return;
+        }
+
+        const count = prizes.length;
+        const slice = 360 / count;
+        const targetCenter = index * slice + slice / 2;
+        const finalRotation = (360 * 6) + (360 - targetCenter);
+
+        const start = performance.now();
+        const duration = 4200;
+        const from = currentRotation;
+        const to = currentRotation + finalRotation;
+
+        function easeOutCubic(t) {
+          return 1 - Math.pow(1 - t, 3);
+        }
+
+        function frame(now) {
+          const elapsed = now - start;
+          const progress = Math.min(elapsed / duration, 1);
+          const eased = easeOutCubic(progress);
+          const value = from + (to - from) * eased;
+
+          drawWheel(prizes, value);
+
+          if (progress < 1) {
+            requestAnimationFrame(frame);
+          } else {
+            currentRotation = value % 360;
+            drawWheel(prizes, currentRotation);
+            resolve();
+          }
+        }
+
+        requestAnimationFrame(frame);
+      });
+    }
+
+    async function spinWheel() {
+      if (isSpinning) return;
+      const initData = getInitData();
+
+      if (!initData) {
+        setStatus("initData пустой. Открой Mini App из Telegram.", "error");
+        return;
+      }
+
+      isSpinning = true;
+      spinBtn.disabled = true;
+      resultBox.classList.add("hidden");
+      setStatus("Крутим колесо...");
+
+      try {
+        const data = await safeFetchJson(`${API_BASE}/spin`, {
+          method: "POST",
+          body: JSON.stringify({ init_data: initData })
+        });
+
+        await animateSpinToPrize(data.prize_id);
+
+        resultPrizeTitle.textContent = data.prize_title || "Ваш приз";
+        resultPrizeDesc.textContent = data.prize_description || "";
+        resultCode.textContent = data.code || "—";
+        resultExpires.textContent = data.expires_at_text ? `Действует: ${data.expires_at_text}` : "Срок действия уточняйте у сотрудника";
+        resultBox.classList.remove("hidden");
+        setStatus("Выигрыш сохранён.", "ok");
+        loadHistory();
+      } catch (e) {
+        const message = String(e.message || e);
+        if (message.includes("Сегодня вы уже использовали попытку")) {
+          setStatus("Сегодня вы уже крутили колесо.", "warn");
+        } else {
+          setStatus(`Ошибка: ${message}`, "error");
+        }
+      } finally {
+        isSpinning = false;
+        spinBtn.disabled = false;
+      }
+    }
+
+    async function copyCode() {
+      const code = resultCode.textContent.trim();
+      if (!code || code === "—") return;
+      try {
+        await navigator.clipboard.writeText(code);
+        setStatus("Код скопирован.", "ok");
+      } catch (e) {
+        setStatus("Не удалось скопировать код.", "error");
+      }
+    }
+
+    function renderHistory(items) {
+      historyList.innerHTML = "";
+      if (!items.length) {
+        historyList.innerHTML = `<div class="history-item"><div class="small">История пока пустая.</div></div>`;
+        return;
+      }
+
+      items.forEach((item) => {
+        const statusClass = item.redeemed ? "badge-off" : "badge-ok";
+        const statusText = item.redeemed ? "Погашен" : "Активен";
+
+        const el = document.createElement("div");
+        el.className = "history-item";
+        el.innerHTML = `
+          <div class="history-top">
+            <div>
+              <div class="prize-title">${escapeHtml(item.prize_title || "Приз")}</div>
+              <div class="small">${escapeHtml(item.prize_description || "")}</div>
+            </div>
+            <div class="badge ${statusClass}">${statusText}</div>
+          </div>
+          <div class="small">Код: ${escapeHtml(item.code || "—")}</div>
+          <div class="small">Получен: ${escapeHtml(item.created_at_text || "—")}</div>
+          <div class="small">Действует: ${escapeHtml(item.expires_at_text || "—")}</div>
+        `;
+        historyList.appendChild(el);
+      });
+    }
+
+    async function loadHistory() {
+      const initData = getInitData();
+      if (!initData) return;
+
+      try {
+        const data = await safeFetchJson(`${API_BASE}/history`, {
+          method: "POST",
+          body: JSON.stringify({ init_data: initData })
+        });
+        renderHistory(data.items || []);
+      } catch (e) {
+        historyList.innerHTML = `<div class="history-item"><div class="small">Не удалось загрузить историю.</div></div>`;
+      }
+    }
+
     async function checkAdmin() {
       const initData = getInitData();
 
       if (!initData) {
-        setAdminStatus("Нет initData. Админка не может быть проверена.", "error");
+        setAdminStatus("Нет initData. Админка недоступна.", "error");
+        adminBlock.classList.add("hidden");
         return;
       }
 
-      setAdminStatus("Проверяем доступ к админке...");
       try {
         const data = await safeFetchJson(`${API_BASE}/admin/me`, {
           method: "POST",
           body: JSON.stringify({ init_data: initData })
         });
 
-        serverResponseBox.textContent = safeStringify(data);
-        adminBlock.classList.add("show");
         setAdminStatus(`Доступ разрешён. Telegram ID: ${data.telegram_id}`, "ok");
+        adminBlock.classList.remove("hidden");
+        loadAdminPrizes();
       } catch (e) {
-        adminBlock.classList.remove("show");
-        serverResponseBox.textContent = String(e.message || e);
         setAdminStatus(`Админка недоступна: ${e.message || e}`, "error");
+        adminBlock.classList.add("hidden");
       }
     }
 
-    async function loadPrizes() {
+    function renderAdminPrizes(items) {
+      adminPrizeList.innerHTML = "";
+      if (!items.length) {
+        adminPrizeList.innerHTML = `<div class="prize-item"><div class="small">Призов пока нет.</div></div>`;
+        return;
+      }
+
+      items.forEach((item) => {
+        const el = document.createElement("div");
+        el.className = "prize-item";
+        el.innerHTML = `
+          <div class="prize-top">
+            <div>
+              <div class="prize-title">${escapeHtml(item.title)}</div>
+              <div class="small">ID: ${item.id} · short: ${escapeHtml(item.short || "")}</div>
+            </div>
+            <div class="badge ${item.active ? "badge-ok" : "badge-off"}">${item.active ? "Включен" : "Выключен"}</div>
+          </div>
+          <div class="small">${escapeHtml(item.description || "")}</div>
+          <div class="small">Вес: ${item.weight}</div>
+        `;
+        adminPrizeList.appendChild(el);
+      });
+    }
+
+    async function loadAdminPrizes() {
       try {
         const data = await safeFetchJson(`${API_BASE}/admin/prizes`, {
           method: "POST",
           body: JSON.stringify({ init_data: getInitData() })
         });
-
-        prizeList.innerHTML = "";
-        const items = data.items || [];
-
-        if (!items.length) {
-          prizeList.innerHTML = `<div class="prize-item"><div class="small">Призов пока нет.</div></div>`;
-          return;
-        }
-
-        items.forEach((item) => {
-          const el = document.createElement("div");
-          el.className = "prize-item";
-          el.innerHTML = `
-            <div class="prize-title">${escapeHtml(item.title)}</div>
-            <div class="small">ID: ${item.id} · short: ${escapeHtml(item.short || "")}</div>
-            <div class="small">${escapeHtml(item.description || "")}</div>
-            <div class="small">Вес: ${item.weight} · Активен: ${item.active ? "да" : "нет"}</div>
-          `;
-          prizeList.appendChild(el);
-        });
-
-        setAdminStatus("Призы загружены.", "ok");
+        renderAdminPrizes(data.items || []);
       } catch (e) {
         setAdminStatus(`Не удалось загрузить призы: ${e.message || e}`, "error");
       }
@@ -371,6 +853,7 @@
 
         serverResponseBox.textContent = safeStringify(data);
         setAdminStatus("Приз добавлен.", "ok");
+        await loadAdminPrizes();
         await loadPrizes();
       } catch (e) {
         setAdminStatus(`Ошибка добавления приза: ${e.message || e}`, "error");
@@ -401,7 +884,7 @@
         if (!tg.initData) {
           setStatus("Telegram открыл страницу без initData. Проверь запуск через кнопку Mini App.", "warn");
         } else {
-          setStatus("Telegram WebApp инициализирован.", "ok");
+          setStatus("Готово к запуску.", "ok");
         }
       } catch (e) {
         setStatus(`Ошибка инициализации Telegram WebApp: ${e.message || e}`, "error");
@@ -410,18 +893,19 @@
     }
 
     document.getElementById("btnCheckInit").addEventListener("click", checkInitData);
-    document.getElementById("btnCheckAdmin").addEventListener("click", checkAdmin);
-    document.getElementById("btnLoadPrizes").addEventListener("click", loadPrizes);
+    document.getElementById("btnDebugEnv").addEventListener("click", debugEnv);
     document.getElementById("btnAddPrize").addEventListener("click", addPrize);
+    document.getElementById("btnLoadAdminPrizes").addEventListener("click", loadAdminPrizes);
+    spinBtn.addEventListener("click", spinWheel);
+    copyCodeBtn.addEventListener("click", copyCode);
 
-    initTelegram();
+    async function bootstrap() {
+      initTelegram();
+      await loadPrizes();
+      drawWheel(prizes, currentRotation);
+    }
+
+    bootstrap();
   </script>
 </body>
 </html>
-<script>
-  alert(
-    "origin: " + window.location.origin + "\n" +
-    "href: " + window.location.href + "\n" +
-    "initData length: " + ((window.Telegram && Telegram.WebApp && Telegram.WebApp.initData) ? Telegram.WebApp.initData.length : 0)
-  );
-</script>
