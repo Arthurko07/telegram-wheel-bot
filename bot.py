@@ -2,7 +2,6 @@ import os
 import hmac
 import json
 import uuid
-import shutil
 import hashlib
 import secrets
 from pathlib import Path
@@ -39,7 +38,9 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 
 if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
@@ -51,7 +52,7 @@ Base = declarative_base()
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-app = FastAPI(title="Telegram Wheel Bot API", version="7.0.0")
+app = FastAPI(title="Telegram Wheel Bot API", version="7.1.0")
 
 origins = ["*"] if CORS_ORIGINS_RAW == "*" else [x.strip() for x in CORS_ORIGINS_RAW.split(",") if x.strip()]
 app.add_middleware(
@@ -115,7 +116,7 @@ class SpinResult(Base):
 Base.metadata.create_all(bind=engine)
 
 # =========================================================
-# SMALL MIGRATION HELPERS
+# SQLITE LIGHT MIGRATION
 # =========================================================
 
 def ensure_sqlite_column_exists():
@@ -244,7 +245,7 @@ def verify_telegram_init_data(init_data: str) -> dict:
     data = parse_init_data(init_data)
     received_hash = data.pop("hash", None)
     if not received_hash:
-      raise HTTPException(status_code=401, detail="Invalid Telegram auth data")
+        raise HTTPException(status_code=401, detail="Invalid Telegram auth data")
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
     secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
@@ -309,7 +310,7 @@ def require_admin(payload: dict, db: Session) -> User:
 
 @app.get("/")
 async def root():
-    return {"ok": True, "service": "telegram-wheel-bot-api", "version": "7.0.0"}
+    return {"ok": True, "service": "telegram-wheel-bot-api", "version": "7.1.0"}
 
 # =========================================================
 # PUBLIC / USER ENDPOINTS
@@ -445,10 +446,7 @@ async def admin_upload_prize_image(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    admin = require_admin({"init_data": init_data}, db)
-
-    if not admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
+    require_admin({"init_data": init_data}, db)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="Файл не выбран")
@@ -472,7 +470,8 @@ async def admin_upload_prize_image(
             size += len(chunk)
             if size > MAX_FILE_SIZE_MB * 1024 * 1024:
                 buffer.close()
-                os.remove(filepath)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
                 raise HTTPException(status_code=400, detail=f"Файл слишком большой, максимум {MAX_FILE_SIZE_MB} MB")
             buffer.write(chunk)
 
@@ -729,12 +728,12 @@ async def admin_seed_default_prizes(payload: dict, db: Session = Depends(get_db)
         return {"ok": True, "message": "Призы уже существуют"}
 
     defaults = [
-        {"title": "Скидка 5%", "short": "5%", "description": "Скидка 5% на покупку", "weight": 40, "active": True},
-        {"title": "Скидка 10%", "short": "10%", "description": "Скидка 10% на покупку", "weight": 25, "active": True},
-        {"title": "Скидка 15%", "short": "15%", "description": "Скидка 15% на аксессуары", "weight": 15, "active": True},
-        {"title": "Бесплатная доставка", "short": "Доставка", "description": "Бесплатная доставка заказа", "weight": 10, "active": True},
-        {"title": "Подарок", "short": "Подарок", "description": "Подарок к покупке", "weight": 6, "active": True},
-        {"title": "Бонус", "short": "Бонус", "description": "Бонус на следующий заказ", "weight": 4, "active": True},
+        {"title": "Скидка 5%", "short": "5%", "description": "Скидка 5% на покупку", "weight": 40, "active": True, "image_url": None},
+        {"title": "Скидка 10%", "short": "10%", "description": "Скидка 10% на покупку", "weight": 25, "active": True, "image_url": None},
+        {"title": "Скидка 15%", "short": "15%", "description": "Скидка 15% на аксессуары", "weight": 15, "active": True, "image_url": None},
+        {"title": "Бесплатная доставка", "short": "Доставка", "description": "Бесплатная доставка заказа", "weight": 10, "active": True, "image_url": None},
+        {"title": "Подарок", "short": "Подарок", "description": "Подарок к покупке", "weight": 6, "active": True, "image_url": None},
+        {"title": "Бонус", "short": "Бонус", "description": "Бонус на следующий заказ", "weight": 4, "active": True, "image_url": None},
     ]
 
     for item in defaults:
