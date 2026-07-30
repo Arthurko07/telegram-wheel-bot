@@ -11,27 +11,12 @@ from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    Boolean,
-    Text,
-    DateTime,
-    ForeignKey,
-)
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    Message,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    WebAppInfo,
-    BotCommand,
-)
+from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, WebAppInfo, BotCommand
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./wheel.db")
@@ -39,7 +24,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://telegram-wheel-bot-production-764c.up.railway.app")
-APP_VERSION = "12.0.0-final-bundle"
+APP_VERSION = "12.1.0-working-bundle"
 
 UPLOAD_DIR = "uploads"
 STATIC_DIR = "static"
@@ -320,7 +305,7 @@ async def cmd_start(message: Message):
 
 async def cmd_help(message: Message):
     await message.answer(
-        "1. Открой Mini App\n2. Проверь initData\n3. Проверь админку",
+        "1. Открой Mini App\n2. Крути колесо\n3. Получай код приза",
         reply_markup=build_main_keyboard(),
     )
 
@@ -328,11 +313,11 @@ async def cmd_help(message: Message):
 async def handle_text(message: Message):
     text = (message.text or "").strip()
     if text == "ℹ️ Как это работает":
-        await cmd_help(message)
-        return
+      await cmd_help(message)
+      return
     if text in {"🔄 Открыть заново", "🎡 Открыть колесо"}:
-        await message.answer("Нажми кнопку Mini App ниже.", reply_markup=build_main_keyboard())
-        return
+      await message.answer("Нажми кнопку Mini App ниже.", reply_markup=build_main_keyboard())
+      return
     await message.answer("Используй /start.", reply_markup=build_main_keyboard())
 
 
@@ -639,3 +624,150 @@ async def admin_prize_add(payload: dict, db: Session = Depends(get_db)):
 
     items = db.query(Prize).order_by(Prize.id.desc()).all()
     return {"ok": True, "item": serialize_prize(prize), "items": [serialize_prize(item) for item in items]}
+
+
+@app.post("/admin/prize/update")
+async def admin_prize_update(payload: dict, db: Session = Depends(get_db)):
+    require_admin(payload, db)
+    prize_id = int(payload.get("prize_id"))
+    prize = db.query(Prize).filter(Prize.id == prize_id).first()
+    if not prize:
+        raise HTTPException(status_code=404, detail="Приз не найден")
+
+    title = str(payload.get("title", "")).strip()
+    short = str(payload.get("short", "")).strip()
+    description = str(payload.get("description", "")).strip()
+    image_url = str(payload.get("image_url", "")).strip() or None
+    weight = int(payload.get("weight", prize.weight))
+    active = bool(payload.get("active", prize.active))
+
+    if not title or not short or not description or weight <= 0:
+        raise HTTPException(status_code=400, detail="Некорректные данные приза")
+
+    prize.title = title
+    prize.short = short
+    prize.description = description
+    prize.weight = weight
+    prize.active = active
+    prize.image_url = image_url
+
+    db.commit()
+
+    items = db.query(Prize).order_by(Prize.id.desc()).all()
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
+
+@app.post("/admin/prize/update-weight")
+async def admin_prize_update_weight(payload: dict, db: Session = Depends(get_db)):
+    require_admin(payload, db)
+    prize_id = int(payload.get("prize_id"))
+    weight = int(payload.get("weight", 0))
+    if weight <= 0:
+        raise HTTPException(status_code=400, detail="Вес должен быть больше 0")
+
+    prize = db.query(Prize).filter(Prize.id == prize_id).first()
+    if not prize:
+        raise HTTPException(status_code=404, detail="Приз не найден")
+
+    prize.weight = weight
+    db.commit()
+
+    items = db.query(Prize).order_by(Prize.id.desc()).all()
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
+
+@app.post("/admin/prize/toggle")
+async def admin_prize_toggle(payload: dict, db: Session = Depends(get_db)):
+    require_admin(payload, db)
+    prize_id = int(payload.get("prize_id"))
+    prize = db.query(Prize).filter(Prize.id == prize_id).first()
+    if not prize:
+        raise HTTPException(status_code=404, detail="Приз не найден")
+
+    prize.active = not prize.active
+    db.commit()
+
+    items = db.query(Prize).order_by(Prize.id.desc()).all()
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
+
+@app.post("/admin/prize/delete")
+async def admin_prize_delete(payload: dict, db: Session = Depends(get_db)):
+    require_admin(payload, db)
+    prize_id = int(payload.get("prize_id"))
+    prize = db.query(Prize).filter(Prize.id == prize_id).first()
+    if not prize:
+        raise HTTPException(status_code=404, detail="Приз не найден")
+
+    db.delete(prize)
+    db.commit()
+
+    items = db.query(Prize).order_by(Prize.id.desc()).all()
+    return {"ok": True, "items": [serialize_prize(item) for item in items]}
+
+
+@app.post("/admin/code/check")
+async def admin_code_check(payload: dict, db: Session = Depends(get_db)):
+    require_admin(payload, db)
+    code = str(payload.get("code", "")).strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="Код не указан")
+
+    spin = db.query(SpinResult).filter(SpinResult.code == code).first()
+    if not spin:
+        raise HTTPException(status_code=404, detail="Код не найден")
+
+    return {
+        "ok": True,
+        "code": spin.code,
+        "redeemed": spin.redeemed,
+        "prize_title": spin.prize.title if spin.prize else None,
+        "expires_at_text": format_expiry_human(spin.expires_at),
+    }
+
+
+@app.post("/admin/code/redeem")
+async def admin_code_redeem(payload: dict, db: Session = Depends(get_db)):
+    require_admin(payload, db)
+    code = str(payload.get("code", "")).strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="Код не указан")
+
+    spin = db.query(SpinResult).filter(SpinResult.code == code).first()
+    if not spin:
+        raise HTTPException(status_code=404, detail="Код не найден")
+
+    if spin.redeemed:
+        raise HTTPException(status_code=400, detail="Код уже погашен")
+
+    spin.redeemed = True
+    db.commit()
+
+    return {
+        "ok": True,
+        "code": spin.code,
+        "redeemed": spin.redeemed,
+        "prize_title": spin.prize.title if spin.prize else None,
+    }
+
+
+def seed_default_prizes():
+    db = SessionLocal()
+    try:
+        count = db.query(Prize).count()
+        if count == 0:
+            defaults = [
+                Prize(title="Скидка 5%", short="5%", description="Скидка 5% на покупку.", weight=30, active=True),
+                Prize(title="Скидка 10%", short="10%", description="Скидка 10% на покупку.", weight=20, active=True),
+                Prize(title="Скидка 15%", short="15%", description="Скидка 15% на аксессуары.", weight=12, active=True),
+                Prize(title="Бесплатная доставка", short="Доставка", description="Бесплатная доставка заказа.", weight=10, active=True),
+                Prize(title="Подарок", short="Подарок", description="Небольшой подарок к покупке.", weight=8, active=True),
+                Prize(title="Бонус", short="Бонус", description="Дополнительный бонус к заказу.", weight=6, active=True),
+            ]
+            db.add_all(defaults)
+            db.commit()
+    finally:
+        db.close()
+
+
+seed_default_prizes()
