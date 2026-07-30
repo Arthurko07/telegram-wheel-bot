@@ -3,5 +3,6 @@ fastapi
 uvicorn[standard]
 pydantic
 psycopg[binary]
-SQLAlchemy
+sqlalchemy
 python-multipart
+python-dotenv
