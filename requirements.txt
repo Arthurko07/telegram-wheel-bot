@@ -1,8 +1,7 @@
-aiogram==3.20.0.post0
 fastapi
 uvicorn[standard]
 pydantic
 psycopg[binary]
 sqlalchemy
 python-multipart
-python-dotenv
+python-telegram-bot==22.5
