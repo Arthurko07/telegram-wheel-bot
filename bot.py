@@ -6,6 +6,7 @@ import time
 import hashlib
 import secrets
 import logging
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -26,18 +27,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
-from telegram import (
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    Message,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    Update,
     WebAppInfo,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+    Update,
 )
 
 # =========================================================
@@ -50,7 +47,7 @@ ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
 DEBUG_AUTH = os.getenv("DEBUG_AUTH", "true").lower() == "true"
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://telegram-wheel-bot-production-764c.up.railway.app")
-APP_VERSION = "8.2.0-unified"
+APP_VERSION = "9.0.0-aiogram-fastapi"
 
 UPLOAD_DIR = "uploads"
 MAX_FILE_SIZE_MB = 10
@@ -78,7 +75,9 @@ Base = declarative_base()
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-telegram_app: Optional[Application] = None
+bot: Optional[Bot] = None
+dp: Optional[Dispatcher] = None
+polling_task: Optional[asyncio.Task] = None
 
 # =========================================================
 # MODELS
@@ -365,7 +364,7 @@ def require_admin(payload: dict, db: Session) -> User:
     return user
 
 # =========================================================
-# TELEGRAM BOT
+# AIOGRAM
 # =========================================================
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -387,117 +386,103 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-async def tg_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-
+async def cmd_start(message: Message):
     text = (
         "Привет! Это бот колеса бонусов iGadget.\n\n"
         "Нажми кнопку ниже, чтобы открыть Mini App и прокрутить колесо."
     )
-
-    await update.message.reply_text(
-        text,
-        reply_markup=build_main_keyboard(),
-    )
+    await message.answer(text, reply_markup=build_main_keyboard())
 
 
-async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-
+async def cmd_help(message: Message):
     text = (
         "Как использовать бота:\n"
         "1. Нажми «🎡 Открыть колесо».\n"
         "2. Mini App откроется внутри Telegram.\n"
         "3. Нажми кнопку старта на колесе и получи приз."
     )
-    await update.message.reply_text(text, reply_markup=build_main_keyboard())
+    await message.answer(text, reply_markup=build_main_keyboard())
 
 
-async def tg_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text.strip()
+async def handle_text(message: Message):
+    text = (message.text or "").strip()
 
     if text == "ℹ️ Как это работает":
-        await tg_help(update, context)
+        await cmd_help(message)
         return
 
     if text == "🔄 Открыть заново":
-        await update.message.reply_text(
+        await message.answer(
             "Нажми кнопку ниже, чтобы снова открыть приложение.",
             reply_markup=build_main_keyboard(),
         )
         return
 
     if text == "🎡 Открыть колесо":
-        await update.message.reply_text(
-            "Открываю Mini App. Если кнопка не сработала, нажми её ещё раз.",
+        await message.answer(
+            "Нажми кнопку Mini App ниже.",
             reply_markup=build_main_keyboard(),
         )
         return
 
-    await update.message.reply_text(
+    await message.answer(
         "Используй /start или кнопку «🎡 Открыть колесо».",
         reply_markup=build_main_keyboard(),
     )
 
 
-async def tg_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_message.web_app_data:
-        return
-
-    await update.effective_message.reply_text(
+async def handle_web_app_data(message: Message):
+    await message.answer(
         "Данные из Mini App получены.",
         reply_markup=build_main_keyboard(),
     )
 
 
-async def init_telegram_bot():
-    global telegram_app
+def register_aiogram_handlers(dispatcher: Dispatcher):
+    dispatcher.message.register(cmd_start, CommandStart())
+    dispatcher.message.register(cmd_help, Command("help"))
+    dispatcher.message.register(handle_web_app_data, F.web_app_data)
+    dispatcher.message.register(handle_text, F.text)
+
+
+async def start_aiogram_bot():
+    global bot, dp, polling_task
 
     if not BOT_TOKEN:
-        logger.warning("BOT_TOKEN is empty, telegram bot will not start")
+        logger.warning("BOT_TOKEN is empty, aiogram bot will not start")
         return
 
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+    register_aiogram_handlers(dp)
 
-    telegram_app.add_handler(CommandHandler("start", tg_start))
-    telegram_app.add_handler(CommandHandler("help", tg_help))
-    telegram_app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, tg_web_app_data))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_text_router))
+    await bot.delete_webhook(drop_pending_updates=False)
+    await bot.set_my_commands([
+        ("start", "Запустить бота"),
+        ("help", "Помощь"),
+    ])
 
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    me = await bot.get_me()
+    logger.info("Aiogram bot started as @%s (%s)", me.username, me.id)
 
-    try:
-        await telegram_app.bot.set_my_commands([
-            ("start", "Запустить бота"),
-            ("help", "Помощь"),
-        ])
-        me = await telegram_app.bot.get_me()
-        logger.info("Telegram bot started as @%s (%s)", me.username, me.id)
-    except Exception as e:
-        logger.exception("Telegram bot post-init failed: %s", e)
+    polling_task = asyncio.create_task(dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()))
 
 
-async def stop_telegram_bot():
-    global telegram_app
+async def stop_aiogram_bot():
+    global bot, dp, polling_task
 
-    if not telegram_app:
-        return
+    if polling_task:
+        polling_task.cancel()
+        try:
+            await polling_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("Polling stop failed: %s", e)
 
-    try:
-        if telegram_app.updater:
-            await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
-        logger.info("Telegram bot stopped")
-    except Exception as e:
-        logger.exception("Telegram bot stop failed: %s", e)
+    if bot:
+        await bot.session.close()
+        logger.info("Aiogram bot stopped")
 
 # =========================================================
 # FASTAPI LIFESPAN
@@ -506,9 +491,9 @@ async def stop_telegram_bot():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting unified app %s", APP_VERSION)
-    await init_telegram_bot()
+    await start_aiogram_bot()
     yield
-    await stop_telegram_bot()
+    await stop_aiogram_bot()
     logger.info("Unified app stopped")
 
 app = FastAPI(title="Telegram Wheel Bot API", version=APP_VERSION, lifespan=lifespan)
@@ -862,13 +847,13 @@ async def admin_prize_delete(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Приз не найден")
 
     if prize.image_url and "/uploads/" in prize.image_url:
-        filename = prize.image_url.split("/uploads/")[-1]
-        filepath = os.path.join(UPLOAD_DIR, filename)
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
+      filename = prize.image_url.split("/uploads/")[-1]
+      filepath = os.path.join(UPLOAD_DIR, filename)
+      if os.path.exists(filepath):
+          try:
+              os.remove(filepath)
+          except Exception:
+              pass
 
     db.delete(prize)
     db.commit()
